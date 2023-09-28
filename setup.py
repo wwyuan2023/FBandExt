@@ -1,0 +1,79 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+"""Setup fbandext libarary."""
+
+import os
+import pip
+import sys
+
+from distutils.version import LooseVersion
+from setuptools import find_packages
+from setuptools import setup
+
+if LooseVersion(sys.version) < LooseVersion("3.6"):
+    raise RuntimeError(
+        "fbandext requires Python>=3.6, "
+        "but your Python is {}".format(sys.version))
+
+requirements = {
+    "install": [
+        "torch>=1.6",
+        "torchaudio",
+        "setuptools>=38.5.1",
+        "PyYAML>=3.12",
+        "numpy",
+        "scipy",
+        "soundfile",
+        "librosa>=0.10",
+    ],
+    "setup": [
+    ],
+    "test": [
+    ]
+}
+entry_points = {
+    "console_scripts": [
+        "fbandext-train=fbandext.bin.train:main",
+        "fbandext-infer=fbandext.bin.infer:main",
+        "fbandext-export=fbandext.bin.export:main",
+    ]
+}
+
+install_requires = requirements["install"]
+setup_requires = requirements["setup"]
+tests_require = requirements["test"]
+extras_require = {k: v for k, v in requirements.items()
+                  if k not in ["install", "setup"]}
+
+dirname = os.path.dirname(__file__)
+exec(open(os.path.join(dirname, "fbandext/version.py")).read())
+setup(name="fbandext",
+      version=__version__,
+      url="http://github.com/wwyuan2023/FBandExt.git",
+      author="wuwen.yww",
+      author_email="yuanwuwen@126.com",
+      description="FBandExt implementation",
+      long_description=open(os.path.join(dirname, "README.md"),
+                            encoding="utf-8").read(),
+      long_description_content_type="text/markdown",
+      license="MIT License",
+      packages=find_packages(include=["fbandext*"]),
+      install_requires=install_requires,
+      setup_requires=setup_requires,
+      tests_require=tests_require,
+      extras_require=extras_require,
+      entry_points=entry_points,
+      include_package_data=True,
+      classifiers=[
+          "Programming Language :: Python :: 3.6",
+          "Programming Language :: Python :: 3.7",
+          "Programming Language :: Python :: 3.8",
+          "Programming Language :: Python :: 3.9",
+          "Programming Language :: Python :: 3.10",
+          "Programming Language :: Python :: 3.11",
+          "Intended Audience :: Science/Research",
+          "Operating System :: POSIX :: Linux",
+          "License :: OSI Approved :: MIT License",
+          "Topic :: Software Development :: Libraries :: Python Modules"],
+      )

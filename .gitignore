@@ -1,0 +1,6 @@
+__pycache__
+egs/
+dist
+fbandext.egg-info
+checkpoint
+*.swp
