@@ -1,6 +1,6 @@
 
 
-WAV音频的降噪和去混响，非流式模型。
+Wav音频超分
 
-推理参考命令denoisenet-infer --help
+推理参考命令fbandext-infer --help
 
