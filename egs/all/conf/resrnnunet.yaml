@@ -55,7 +55,7 @@ lambda_adv: 1
 #                  DATA LOADER SETTING                    #
 ###########################################################
 batch_size: 8
-segment_size: 32512
+segment_size: 48896
 pin_memory: true
 num_workers: 8
 

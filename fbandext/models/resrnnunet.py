@@ -267,7 +267,7 @@ class ResRNNUNet(nn.Module):
         return y_hat # (B, t*2)
     
     @torch.no_grad()
-    def infer(self, x, segment_length=32512, overlap_length=1024):
+    def infer(self, x, segment_length=48896, overlap_length=16000):
         # x: source signal 16kHz sampling rate, shape=(B, t), t=audio length
         assert (segment_length // self.hop_size + 1) % np.prod(self.downsample_factors) == 0
         hop_length = segment_length - overlap_length
