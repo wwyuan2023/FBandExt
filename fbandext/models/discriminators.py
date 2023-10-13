@@ -19,7 +19,7 @@ class WaveDiscriminator(nn.Module):
         kernel_size=5,
         layers=10,
         conv_channels=64,
-        use_weight_norm=False,
+        use_weight_norm=True,
     ):
         super().__init__()
         
@@ -62,7 +62,7 @@ class MultiWaveDiscriminator(nn.Module):
         kernel_size=5,
         layers=10,
         conv_channels=64,
-        use_weight_norm=False,
+        use_weight_norm=True,
     ):
         super().__init__()
         self.num_dwt = num_dwt
@@ -70,7 +70,7 @@ class MultiWaveDiscriminator(nn.Module):
             WaveDiscriminator(
                 2**i,
                 kernel_size,
-                layers,
+                layers-i,
                 conv_channels+i*32,
                 use_weight_norm=use_weight_norm
             ) for i in range(num_dwt)
@@ -97,21 +97,23 @@ class STFTDiscriminator(nn.Module):
         fft_size=1024,
         hop_size=256,
         win_size=1024,
+        window="hann_window",
         num_layers=4,
         kernel_size=3,
         stride=1,
         conv_channels=256,
-        use_weight_norm=False,
+        use_logmag=False,
+        use_weight_norm=True,
     ):
         super().__init__()
         assert (kernel_size - 1) % 2 == 0, "Not support even number kernel size."
         self.fft_size = fft_size
         self.hop_size = hop_size
         self.win_size = win_size
-        self.register_buffer('window', torch.hann_window(win_size), persistent=False)
+        self.use_logmag = use_logmag
         
         fnorm = weight_norm if use_weight_norm else spectral_norm
-        F = fft_size//4 + 1 # !!! only focus on high frequency 
+        F = fft_size//2 + 1
         s0 = int(F ** (1.0 / float(num_layers)))
         s1 = stride
         k0 = s0 * 2 + 1
@@ -120,17 +122,15 @@ class STFTDiscriminator(nn.Module):
         
         convs = [
             fnorm(Conv2d(1, cc, (k0,k1), stride=(s0,s1), padding=0)),
-            LeakyReLU(LRELU_SLOPE),
+            LeakyReLU(LRELU_SLOPE, True),
         ]
         F = int((F - k0) / s0 + 1)
-        assert F > 0, f"fft_size={fft_size}, F={F}"
         for i in range(num_layers - 2):
             convs += [
                 fnorm(Conv2d(cc, cc, (k0,k1), stride=(s0,s1), padding=0)),
-                LeakyReLU(LRELU_SLOPE),
+                LeakyReLU(LRELU_SLOPE, True),
             ]
             F = int((F - k0) / s0 + 1)
-            assert F > 0, f"fft_size={fft_size}, i={i}, F={F}"
         convs += [
             fnorm(Conv2d(cc, 1, (F,1), stride=(1,1), padding=0)),
         ]
@@ -152,27 +152,25 @@ class STFTDiscriminator(nn.Module):
         self.apply(_reset_parameters)
         
     def forward(self, x):
-        # x: (B, t)
-        x = torch.stft(x,
-            n_fft=self.fft_size, hop_length=self.hop_size, 
-            win_length=self.win_size, window=self.window, return_complex=False)  # (B, F, T, 2)
-        x = x[:, self.fft_size//4:] # (B, F//2+1, T, 2), only focus on high frequency !!!
-        x = torch.norm(x, p=2, dim=-1) # (B, F//2+1, T)
-        x = x.unsqueeze(1) # (B, 1, F//2+1, T)
-        x = self.convs(x) # (B, 1, F//2+1, T) -> (B, 1, 1, T')
-        return x.squeeze() # (B, T')
+        # x: (B, F, T), F=n_fft//2+1, T=auido_len//hop_size+1
+        if self.use_logmag: x = torch.log10(x + 1e-7)
+        x = x.unsqueeze(1) # (B, 1, F, T)
+        x = self.convs(x) # (B, 1, F, T) -> (B, 1, 1, T')
+        return x.squeeze_(1).squeeze_(2) # (B, T')
 
 
 class MultiSTFTDiscriminator(nn.Module):
     def __init__(
         self,
-        fft_sizes=[128, 256, 512, 1024],
-        hop_sizes=[32, 64, 128, 256],
-        win_sizes=[128, 256, 512, 1024],
-        num_layers=[5, 6, 7, 8],
-        kernel_sizes=[5, 5, 5, 5],
-        conv_channels=[64, 64, 64, 64],
-        use_weight_norm=False,
+        fft_sizes=[512, 1024, 2048],
+        hop_sizes=[128, 256, 512],
+        win_sizes=[512, 1024, 2048],
+        window="hann_window",
+        num_layers=[4, 4, 4],
+        kernel_sizes=[3, 3, 3],
+        conv_channels=[256, 256, 256],
+        use_logmag=False,
+        use_weight_norm=True,
     ):
         super().__init__()
         self.discriminators = nn.ModuleList([
@@ -180,6 +178,7 @@ class MultiSTFTDiscriminator(nn.Module):
                 fft_size=fft_size,
                 hop_size=hop_size,
                 win_size=win_size,
+                window=window,
                 num_layers=num_layer,
                 kernel_size=kernel_size,
                 conv_channels=conv_channel,
@@ -188,8 +187,11 @@ class MultiSTFTDiscriminator(nn.Module):
                 zip(fft_sizes, hop_sizes, win_sizes, num_layers, kernel_sizes, conv_channels)
         ])
     
-    def forward(self, x):
-        return [d(x) for d in self.discriminators]
+    def forward(self, xs):
+        outs = []
+        for x,d in zip(xs, self.discriminators):
+            outs.append(d(x))
+        return outs
 
 
 class MultiWaveSTFTDiscriminator(nn.Module):
@@ -200,7 +202,7 @@ class MultiWaveSTFTDiscriminator(nn.Module):
             "kernel_size": 5,
             "layers": 8,
             "conv_channels": 64,
-            "use_weight_norm": False,
+            "use_weight_norm": True,
         },
         multi_stft_discriminator_params={
             "fft_sizes": [128, 256, 512, 1024, 2048],
@@ -208,7 +210,7 @@ class MultiWaveSTFTDiscriminator(nn.Module):
             "win_sizes": [128, 256, 512, 1024, 2048],
             "num_layers": [3, 4, 5, 6, 7],
             "kernel_sizes": [5, 5, 5, 5, 5],
-            "conv_channels": [128, 128, 128, 128, 128],
+            "conv_channels": [64, 64, 64, 64, 64],
             "use_weight_norm": False,
         },
         
@@ -217,15 +219,16 @@ class MultiWaveSTFTDiscriminator(nn.Module):
         self.mwd = MultiWaveDiscriminator(**multi_wave_discriminator_params)
         self.mfd = MultiSTFTDiscriminator(**multi_stft_discriminator_params)
         
-    def forward(self, x):
+    def forward(self, x, s):
         """Calculate forward propagation.
 
         Args:
-            x (Tensor): Input signal (B, t).
+            x (Tensor): Input signal (B, 1, T).
+            s (Tensor): List of spectrum of input signal (B, F, T).
 
         Returns:
-            Tensor: List of output tensor.
+            Tensor: List of output tensor (B, T')
 
         """
-        return self.mwd(x.unsqueeze(1)) + self.mfd(x)
+        return self.mwd(x) + self.mfd(s)
 

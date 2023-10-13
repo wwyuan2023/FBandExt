@@ -41,13 +41,15 @@ class AudioSCPDataset(Dataset):
         self,
         wav_scpfn,
         segment_size,
+        sampling_rate=16000,
         return_utt_id=False,
         num_repeat=1,
     ):
         """Initialize dataset.
         """
-        self.sr_source = 16000
-        self.sr_target = 32000
+        self.r = 2
+        self.sr_source = sampling_rate
+        self.sr_target = sampling_rate * self.r
         self.segment_size = int(segment_size)
         
         wavfn_list = []
@@ -67,22 +69,27 @@ class AudioSCPDataset(Dataset):
         # load pcm
         y, sr = sf.read(filename, dtype='float32')
         assert sr == self.sr_target
-        r = self.sr_target // self.sr_source
-        assert r == 2
         
         # normalized energy
         y /= abs(y).max()
         
         # adjust length
-        if len(y) <= self.segment_size * r:
-            pad = self.segment_size * r - len(y) + 256
+        if len(y) <= self.segment_size * self.r:
+            pad = self.segment_size * self.r - len(y) + 256
             y = np.pad(y, [pad//2, pad-pad//2], mode='reflect')
         
         # random slice segment
-        start = np.random.randint(0, len(y) - self.segment_size*r)
-        y = y[start:start+self.segment_size*r]
+        start = np.random.randint(0, len(y) - self.segment_size*self.r)
+        y = y[start:start+self.segment_size*self.r]
         
-        return y
+        # downsample
+        res_types = ['soxr_hq', 'soxr_mq', 'soxr_lq', 'fft', 'fft', 'fft']
+        idx = np.random.randint(len(res_types))
+        x = librosa.resample(y, orig_sr=self.sr_target, target_sr=self.sr_source, res_type=res_types[idx])
+        assert len(x) * self.r == len(y), f"len(x)={len(x)}, len(y)={len(y)}\n"
+        x = np.clip(x, -1., 1.)
+        
+        return x, y
     
     def __getitem__(self, idx):
         """Get specified idx items.
@@ -92,18 +99,20 @@ class AudioSCPDataset(Dataset):
 
         Returns:
             str: Utterance id (only in return_utt_id = True).
-            tensor: Audio signal (T,).
+            tensor: source audio signal (1, T).
+            tensor: target audio signal (1, T*2).
 
         """
         wavfn = self.wavfn_list[idx]
-        y = self._load_audio_segment(wavfn)
-        y = torch.from_numpy(y)
+        x, y = self._load_audio_segment(wavfn)
+        x = torch.from_numpy(x).unsqueeze_(0)
+        y = torch.from_numpy(y).unsqueeze_(0)
 
         if self.return_utt_id:
             utt_id = os.path.splitext(os.path.basename(wavfn))[0]
-            items = utt_id, y
+            items = utt_id, x, y
         else:
-            items = y
+            items = x, y
 
         return items
 

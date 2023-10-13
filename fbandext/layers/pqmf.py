@@ -10,7 +10,7 @@ import torch
 import torch.nn.functional as F
 
 import scipy.optimize as optimize
-from scipy.signal import kaiser
+from scipy.signal.windows import kaiser
 
 
 def design_prototype_filter(taps=62, cutoff_ratio=0.142, beta=9.0):
@@ -81,7 +81,7 @@ class PQMF(torch.nn.Module):
 
     """
 
-    def __init__(self, subbands=4, taps=62, beta=9.0, cutoff_ratio=0.142):
+    def __init__(self, subbands=4, taps=62, beta=9.0, cutoff_ratio=0.142, padding=True):
         """Initilize PQMF module.
 
         The cutoff_ratio and beta parameters are optimized for #subbands = 4.
@@ -95,6 +95,7 @@ class PQMF(torch.nn.Module):
 
         """
         super(PQMF, self).__init__()
+        self.padding = padding
         
         # define cutoff_ratio
         cutoff_ratio = define_cutoff_ratio(subbands, taps, beta)
@@ -133,7 +134,7 @@ class PQMF(torch.nn.Module):
         self.cutoff_ratio = cutoff_ratio
 
         # keep padding info
-        self.pad_fn = torch.nn.ConstantPad1d(taps // 2, 0.0)
+        self.pad_fn = torch.nn.ConstantPad1d(taps // 2, 0.0) if padding else torch.nn.Identity()
 
     def analysis(self, x):
         """Analysis with PQMF.
@@ -168,6 +169,7 @@ class PQMF(torch.nn.Module):
 
 if __name__ == "__main__":
     
+    import sys
     import librosa
     import soundfile as sf
 
@@ -175,17 +177,17 @@ if __name__ == "__main__":
     if len(sys.argv) == 4:
         n_band, taps, beta = int(sys.argv[1]), int(sys.argv[2]), float(sys.argv[3])
     print(n_band, taps, beta)
-    alpha = 0.85
+    alpha = 0
     
-    pqmf = PQMF(n_band)
+    pqmf = PQMF(n_band, taps, beta)
     
-    x, sr = librosa.load("./female_0011_p01.wav", 32000)
+    x, sr = librosa.load("./female_0011_p01.wav", sr=32000)
     x = x / max(abs(x))
     x_ = x.copy()
     
     # premphesis
     if alpha > 0:
-        x = x[1:] - 0.85 * x[:-1]
+        x = x[1:] - alpha * x[:-1]
     
     x = torch.tensor(x, dtype=torch.float).view(1,1,-1)
     
@@ -198,7 +200,7 @@ if __name__ == "__main__":
     if alpha > 0:
         y_ = np.zeros_like(y)
         for i in range(1, len(y)):
-            y_[i] = y[i-1] + y_[i-1] * 0.85
+            y_[i] = y[i-1] + y_[i-1] * alpha
     else:
         y_ = y.copy()
     

@@ -31,8 +31,8 @@ def main():
                         help="directory including wav files. you need to specify either scp or rootdir.")
     parser.add_argument("--dumpdir", type=str, required=True,
                         help="directory to dump wav files.")
-    parser.add_argument("--sampling_rate", type=int, default=16000,
-                        help="sampling rate for dump wav files. (default=16000)")
+    parser.add_argument("--sampling_rate", type=int, default=32000,
+                        help="sampling rate for dump wav files. (default=32000)")
     parser.add_argument("--highpass", type=float, default=70.0,
                         help="highpass frequency using `signal.butter`. (default=0)")
     parser.add_argument("--verbose", type=int, default=1,

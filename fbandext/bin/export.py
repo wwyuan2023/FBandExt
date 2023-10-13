@@ -3,11 +3,9 @@
 
 """Train Parallel WaveGAN."""
 
+import os, sys
 import argparse
 import logging
-import os
-import sys
-import glob
 
 import numpy as np
 import torch
@@ -18,23 +16,16 @@ import fbandext.models
 from fbandext.utils import load_model
 
 
-def find_checkpoint_paths(dir_path, regex="checkpoint*.pkl"):
-    path_list = glob.glob(os.path.join(dir_path, regex))
-    path_list.sort(key=lambda f: int("".join(filter(str.isdigit, f))))
-    return path_list
-
 def main():
     """Run training process."""
     parser = argparse.ArgumentParser(
         description="Export FBandExt (See detail in fbandext/bin/export.py).")
     parser.add_argument("--outdir", type=str, required=True,
-                        help="directory to save checkpoints.")
-    parser.add_argument("--checkpoint", "--ckpt", type=str, required=True,
-                        help="checkpoint file to be loaded.")
+                        help="directory to save checkpoint.")
+    parser.add_argument("--checkpoint", "--ckpt", nargs="+", type=str, required=True,
+                        help="checkpoint files to be averaged.")
     parser.add_argument("--config", "--conf", default=None, type=str,
                         help="yaml format configuration file.")
-    parser.add_argument("--greedy-soup", "--greedy", default=False, action='store_true',
-                        help="use average of checkpoints.")
     parser.add_argument("--verbose", type=int, default=1,
                         help="logging level. higher is more logging. (default=1)")
     args = parser.parse_args()
@@ -68,22 +59,18 @@ def main():
         config = yaml.load(f, Loader=yaml.Loader)
     
     # load model
-    if not os.path.isdir(args.checkpoint):
-        model = load_model(args.checkpoint, config)
-    else:
-        ckpt_paths = find_checkpoint_paths(args.checkpoint)
-        model = load_model(ckpt_paths[-1], config)
-        if args.greedy_soup and len(ckpt_paths) > 1:
-            avg = model.state_dict()
-            for ckpt in ckpt_paths[:-1]:
-                logging.info(f"Load [{ckpt}] for averaging.")
-                states = load_model(ckpt, config).state_dict()
-                for k in avg.keys():
-                    avg[k] += states[k]
-            # average
+    logging.info(f"Load [{args.checkpoint[0]}]")
+    model = load_model(args.checkpoint[0], config)
+    if len(args.checkpoint) > 1:
+        avg = torch.load(args.checkpoint[0], map_location="cpu")['model']["generator"]
+        for ckpt in args.checkpoint[1:]:
+            logging.info(f"Load [{ckpt}] for averaging.")
+            states = torch.load(ckpt, map_location="cpu")['model']["generator"]
             for k in avg.keys():
-                avg[k] = torch.true_divide(avg[k], len(ckpt_paths))
-            model.load_state_dict(avg)
+                avg[k] += states[k]
+        for k in avg.keys():
+            avg[k] = torch.true_divide(avg[k], len(args.checkpoint))
+        model.load_state_dict(avg)
     
     # save config to outdir
     config["version"] = fbandext.__version__   # add version info
@@ -98,7 +85,7 @@ def main():
     logging.info(f"Total parameters: {total_params}")
     
     # save model to outdir
-    checkpoint_path = os.path.join(args.outdir, "checkpoint.pkl")
+    checkpoint_path = os.path.join(args.outdir, "checkpoint.pth")
     state_dict = {
         "model": {"generator": model.state_dict()}
     }

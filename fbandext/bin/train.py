@@ -25,6 +25,7 @@ import fbandext.optimizers
 import fbandext.lr_scheduler
 
 from fbandext.datasets import AudioSCPDataset
+from fbandext.layers import MultiResolutionSTFTLoss
 from fbandext.utils import eval_sdr
 
 # set to avoid matplotlib error in CLI environment
@@ -76,6 +77,14 @@ class Trainer(object):
         self.total_train_loss = defaultdict(float)
         self.total_eval_loss = defaultdict(float)
         
+        stft_params = self.config["stft_params"]
+        self.fft_sizes = stft_params["fft_sizes"]
+        self.hop_sizes = stft_params["hop_sizes"]
+        self.win_sizes = stft_params["win_sizes"]
+        self.windows = [
+            getattr(torch, stft_params.get("window", "hann_window"))(win_size).to(self.device) for win_size in self.win_sizes
+        ]
+
     def run(self):
         """Run training."""
         while True:
@@ -145,38 +154,73 @@ class Trainer(object):
             self.scheduler["generator"].load_state_dict(state_dict["scheduler"]["generator"])
             self.scheduler["discriminator"].load_state_dict(state_dict["scheduler"]["discriminator"])
     
+    def _stfts(self, x):
+        # x: (B, 1, t)
+        x = x.squeeze(1)
+        
+        # stft
+        specs, mags = [], []
+        for fft_size, hop_size, win_size, window in zip(self.fft_sizes, self.hop_sizes, self.win_sizes, self.windows):
+            spec = torch.stft(x, 
+                n_fft=fft_size, hop_length=hop_size, win_length=win_size, window=window,
+                center=True, pad_mode='reflect', return_complex=False) # (B, F, T, 2); F=n_fft//2+1, T=t//hop_size+1
+            real, imag = spec[..., 0], spec[..., 1]
+            # NOTE(kan-bayashi): clamp is needed to avoid nan or inf
+            mag = torch.sqrt(torch.clamp(real**2 + imag**2, min=1e-7)) # (B, F, T)
+            specs.append(spec) # (B, F, T, 2)
+            mags.append(mag) # (B, F, T)
+        
+        return specs, mags
+    
     def _train_step(self, batch):
         """Train model one step."""
         # parse batch
-        y = batch.to(self.device) # 32kHz PCM, (B, T)
+        x = batch[0].to(self.device) # 16kHz PCM
+        y = batch[1].to(self.device) # 32kHz PCM
         
         #######################
         #      Generator      #
-        #######################
-        y_, spec_loss, mag_loss = self.model["generator"](y)
-    
-        # PCM mae loss
-        pcm_loss = self.criterion["mae"](y_, y)
-        self.total_train_loss["train/pcm_loss"] += pcm_loss.item()
-        gen_loss = self.config["lambda_pcm"] * pcm_loss
-                
-        # magnitude mae loss
-        self.total_train_loss["train/mag_loss"] += mag_loss.item()
-        gen_loss += self.config["lambda_mag"] * mag_loss
+        #######################    
+        y_, outputs = self.model["generator"](x, self.steps)
+        gen_loss = 0.0
         
-        # spectrum loss
-        self.total_train_loss["train/spec_loss"] += spec_loss.item()
-        gen_loss += self.config["lambda_spec"] * spec_loss
+        # stfts
+        _, y_mags = self._stfts(y)
+        _, y_mags_ = self._stfts(y_)
+        
+        # multi-resolution stft loss
+        if self.config.get("lambda_stft", 0) > 0:
+            sc_loss, mag_loss = self.criterion["stft"](y_mags_, y_mags)
+            self.total_train_loss["train/spectral_convergence_loss"] += sc_loss.item()
+            self.total_train_loss["train/log_stft_magnitude_loss"] += mag_loss.item()
+            gen_loss += self.config["lambda_stft"] * (sc_loss + mag_loss)
+                
+        # make sure the coding are nearly Normal
+        mean, var = outputs[0], outputs[1]
+        self.total_train_loss["train/coding_mean"] += mean.item()
+        self.total_train_loss["train/coding_var"] += var.item()
+        if self.config.get("lambda_punish", 0) > 0:
+            #if self.steps <= self.config["discriminator_train_start_steps"]:
+            gen_loss += self.config["lambda_punish"] * 10 * torch.abs(mean)
+            gen_loss += self.config["lambda_punish"] * var
+        
+        # mse loss of samples
+        if self.config.get("lambda_mse", 0) > 0:
+            mse_loss = self.criterion["mse"](y_, y)
+            self.total_train_loss["train/mse_loss"] += mse_loss.item()
+            gen_loss += self.config["lambda_mse"] * mse_loss
         
         # adversarial loss
-        p_ = self.model["discriminator"](y_)
-        adv_loss = 0.0
-        for i in range(len(p_)):
-            adv_loss += self.criterion["mse"](p_[i], p_[i].new_ones(p_[i].size()))
-        adv_loss /= float(i + 1)
-        self.total_train_loss["train/adversarial_loss"] += adv_loss.item()
-        gen_loss += self.config["lambda_adv"] * adv_loss
-        
+        if self.steps > self.config["discriminator_train_start_steps"]:
+            p_ = self.model["discriminator"](y_, y_mags_)
+            adv_loss = 0.0
+            for i in range(len(p_)):
+                adv_loss += self.criterion["mse"](p_[i], p_[i].new_ones(p_[i].size()))
+            adv_loss /= float(i + 1)
+            self.total_train_loss["train/adversarial_loss"] += adv_loss.item()
+            lambda_adv = min((self.steps - self.config["discriminator_train_start_steps"]) / 100000.0, 1.0) * self.config["lambda_adv"]
+            gen_loss += lambda_adv * adv_loss
+            
         # total loss
         self.total_train_loss["train/generator_loss"] += gen_loss.item()
         
@@ -197,32 +241,33 @@ class Trainer(object):
         #######################
         #    Discriminator    #
         #######################
-        p = self.model["discriminator"](y)
-        p_ = self.model["discriminator"](y_.detach())
-        
-        # multi-discriminator loss
-        real_loss = 0.0
-        fake_loss = 0.0
-        for i in range(len(p)):
-            real_loss += self.criterion["mse"](p[i], p[i].new_ones(p[i].size()))
-            fake_loss += self.criterion["mse"](p_[i], p_[i].new_zeros(p_[i].size()))
-        real_loss /= float(i + 1)
-        fake_loss /= float(i + 1)
-        dis_loss = real_loss + fake_loss
+        if self.steps > self.config["discriminator_train_start_steps"]:
+            p = self.model["discriminator"](y, y_mags)
+            p_ = self.model["discriminator"](y_.detach(), [m.detach() for m in y_mags_])
+            
+            # multi-discriminator loss
+            real_loss = 0.0
+            fake_loss = 0.0
+            for i in range(len(p)):
+                real_loss += self.criterion["mse"](p[i], p[i].new_ones(p[i].size()))
+                fake_loss += self.criterion["mse"](p_[i], p_[i].new_zeros(p_[i].size()))
+            real_loss /= float(i + 1)
+            fake_loss /= float(i + 1)
+            dis_loss = real_loss + fake_loss
 
-        self.total_train_loss["train/real_loss"] += real_loss.item()
-        self.total_train_loss["train/fake_loss"] += fake_loss.item()
-        self.total_train_loss["train/discriminator_loss"] += dis_loss.item()
-        
-        # update discriminator
-        self.optimizer["discriminator"].zero_grad()
-        dis_loss.backward()
-        if self.config["discriminator_grad_norm"] > 0:
-            torch.nn.utils.clip_grad_norm_(
-                self.model["discriminator"].parameters(),
-                self.config["discriminator_grad_norm"])
-        self.optimizer["discriminator"].step()
-        self.scheduler["discriminator"].step()
+            self.total_train_loss["train/real_loss"] += real_loss.item()
+            self.total_train_loss["train/fake_loss"] += fake_loss.item()
+            self.total_train_loss["train/discriminator_loss"] += dis_loss.item()
+            
+            # update discriminator
+            self.optimizer["discriminator"].zero_grad()
+            dis_loss.backward()
+            if self.config["discriminator_grad_norm"] > 0:
+                torch.nn.utils.clip_grad_norm_(
+                    self.model["discriminator"].parameters(),
+                    self.config["discriminator_grad_norm"])
+            self.optimizer["discriminator"].step()
+            self.scheduler["discriminator"].step()
         
         # update counts
         self.steps += 1
@@ -246,8 +291,10 @@ class Trainer(object):
 
         # update
         self.epochs += 1
-        logging.info(f"(Steps: {self.steps}) Finished {self.epochs} epoch training ({train_steps_per_epoch} steps per epoch).")
-        
+        self.train_steps_per_epoch = train_steps_per_epoch
+        logging.info(f"(Steps: {self.steps}) Finished {self.epochs} epoch training "
+                     f"({self.train_steps_per_epoch} steps per epoch).")
+
         # record learning rate
         if self.config["rank"] == 0:
             lr_per_epoch = defaultdict(float)
@@ -263,35 +310,53 @@ class Trainer(object):
     def _eval_step(self, batch):
         """Evaluate model one step."""
         # parse batch
-        y = batch.to(self.device) # 32kHz PCM, (B, T)
+        x = batch[0].to(self.device) # 16kHz PCM
+        y = batch[1].to(self.device) # 32kHz PCM
         
         #######################
         #      Generator      #
         #######################
-        y_, spec_loss, mag_loss = self.model["generator"](y)
-    
-        # PCM mae loss
-        pcm_loss = self.criterion["mae"](y_, y)
-        self.total_eval_loss["eval/pcm_loss"] += pcm_loss.item()
-        gen_loss = self.config["lambda_pcm"] * pcm_loss
-                
-        # magnitude mae loss
-        self.total_eval_loss["eval/mag_loss"] += mag_loss.item()
-        gen_loss += self.config["lambda_mag"] * mag_loss
+        y_, outputs = self.model["generator"](x)
+        gen_loss = 0.0
         
-        # spectrum loss
-        self.total_eval_loss["eval/spec_loss"] += spec_loss.item()
-        gen_loss += self.config["lambda_spec"] * spec_loss
+        # stfts
+        _, y_mags = self._stfts(y)
+        _, y_mags_ = self._stfts(y_)
+        
+        # multi-resolution stft loss
+        if self.config.get("lambda_stft", 0) > 0:
+            sc_loss, mag_loss = self.criterion["stft"](y_mags_, y_mags)
+            self.total_eval_loss["eval/spectral_convergence_loss"] += sc_loss.item()
+            self.total_eval_loss["eval/log_stft_magnitude_loss"] += mag_loss.item()
+            gen_loss = self.config["lambda_stft"] * (sc_loss + mag_loss)
+                
+        # make sure the coding are nearly Normal
+        mean, var = outputs[0], outputs[1]
+        self.total_eval_loss["eval/coding_mean"] += mean.item()
+        self.total_eval_loss["eval/coding_var"] += var.item()
+        if self.config.get("lambda_punish", 0) > 0:
+            #if self.steps <= self.config["discriminator_train_start_steps"]:
+            gen_loss += self.config["lambda_punish"] * 10 * torch.abs(mean)
+            gen_loss += self.config["lambda_punish"] * var
+        
+        # mse loss of samples
+        if self.config.get("lambda_mse", 0) > 0:
+            mse_loss = self.criterion["mse"](y_, y)
+            self.total_eval_loss["eval/mse_loss"] += mse_loss.item()
+            gen_loss += self.config["lambda_mse"] * mse_loss
         
         # adversarial loss
-        p_ = self.model["discriminator"](y_)
-        adv_loss = 0.0
-        for i in range(len(p_)):
-            adv_loss += self.criterion["mse"](p_[i], p_[i].new_ones(p_[i].size()))
-        adv_loss /= float(i + 1)
-        self.total_eval_loss["eval/adversarial_loss"] += adv_loss.item()
-        gen_loss += self.config["lambda_adv"] * adv_loss
-        
+        if self.steps > self.config["discriminator_train_start_steps"]:
+            # multi-discriminator loss
+            p_ = self.model["discriminator"](y_, y_mags_)
+            adv_loss = 0.0
+            for i in range(len(p_)):
+                adv_loss += self.criterion["mse"](p_[i], p_[i].new_ones(p_[i].size()))
+            adv_loss /= float(i + 1)
+            self.total_eval_loss["eval/adversarial_loss"] += adv_loss.item()
+            lambda_adv = min((self.steps - self.config["discriminator_train_start_steps"]) / 100000.0, 1.0) * self.config["lambda_adv"]
+            gen_loss += lambda_adv * adv_loss
+            
         # total loss
         self.total_eval_loss["eval/generator_loss"] += gen_loss.item()
         
@@ -302,23 +367,24 @@ class Trainer(object):
         #######################
         #    Discriminator    #
         #######################
-        p = self.model["discriminator"](y)
-        p_ = self.model["discriminator"](y_.detach())
-        
-        # multi-discriminator loss
-        real_loss = 0.0
-        fake_loss = 0.0
-        for i in range(len(p)):
-            real_loss += self.criterion["mse"](p[i], p[i].new_ones(p[i].size()))
-            fake_loss += self.criterion["mse"](p_[i], p_[i].new_zeros(p_[i].size()))
-        real_loss /= float(i + 1)
-        fake_loss /= float(i + 1)
-        dis_loss = real_loss + fake_loss
+        if self.steps > self.config["discriminator_train_start_steps"]:
+            p = self.model["discriminator"](y, y_mags)
+            p_ = self.model["discriminator"](y_, y_mags_)
+            
+            # multi-discriminator loss
+            real_loss = 0.0
+            fake_loss = 0.0
+            for i in range(len(p)):
+                real_loss += self.criterion["mse"](p[i], p[i].new_ones(p[i].size()))
+                fake_loss += self.criterion["mse"](p_[i], p_[i].new_zeros(p_[i].size()))
+            real_loss /= float(i + 1)
+            fake_loss /= float(i + 1)
+            dis_loss = real_loss + fake_loss
 
-        self.total_eval_loss["eval/real_loss"] += real_loss.item()
-        self.total_eval_loss["eval/fake_loss"] += fake_loss.item()
-        self.total_eval_loss["eval/discriminator_loss"] += dis_loss.item()
-    
+            self.total_eval_loss["eval/real_loss"] += real_loss.item()
+            self.total_eval_loss["eval/fake_loss"] += fake_loss.item()
+            self.total_eval_loss["eval/discriminator_loss"] += dis_loss.item()
+        
     def _eval_epoch(self):
         """Evaluate model one epoch."""
         logging.info(f"(Steps: {self.steps}) Start evaluation.")
@@ -327,21 +393,29 @@ class Trainer(object):
             self.model[key].eval()
 
         # calculate loss for each batch
-        num_save_results = 0
         for eval_steps_per_epoch, batch in enumerate(self.data_loader["dev"], 1):
             # eval one step
             self._eval_step(batch)
 
             # save intermediate result
-            if num_save_results < self.config["num_save_intermediate_results"]:
-                num_save_results = self._genearete_and_save_intermediate_result(batch, num_save_results)
+            if eval_steps_per_epoch == 1:
+                self._genearete_and_save_intermediate_result(batch)
 
-        logging.info(f"(Steps: {self.steps}) Finished evaluation ({eval_steps_per_epoch} steps per epoch).")
+        logging.info(f"(Steps: {self.steps}) Finished evaluation "
+                     f"({eval_steps_per_epoch} steps per epoch).")
 
         # average loss
         for key in self.total_eval_loss.keys():
             self.total_eval_loss[key] /= eval_steps_per_epoch
             logging.info(f"(Steps: {self.steps}) {key} = {self.total_eval_loss[key]:.4f}.")
+        
+        # calculate average bitrate
+        statabr_class = getattr(self.model["generator"].module, "statabr", None)
+        if statabr_class is not None:
+            abr, props = statabr_class.calc_abr()
+            self.total_eval_loss["eval/abr"] = abr
+            logging.info(f"(Steps: {self.steps}) eval/abr = {abr:.2f}.")
+            statabr_class.reset()
         
         # record
         self._write_to_tensorboard(self.total_eval_loss)
@@ -354,14 +428,21 @@ class Trainer(object):
             self.model[key].train()
 
     @torch.no_grad()
-    def _genearete_and_save_intermediate_result(self, batch, num_save_results):
+    def _genearete_and_save_intermediate_result(self, batch):
         """Generate and save intermediate result."""
         # delayed import to avoid error related backend error
         import matplotlib.pyplot as plt
         
+        def _demphasis(y, alpha=self.config.get("alpha", 0)):
+            y_ = np.zeros_like(y)
+            for i in range(1, len(y)):
+                y_[i] = y[i-1] + alpha * y_[i-1]
+            return y_
+
         # generate
-        y = batch.to(self.device)
-        y_, *_ = self.model["generator"](y)
+        x = batch[0].to(self.device)
+        y = batch[1]
+        y_, _ = self.model["generator"](x)
         
         # check directory
         dirname = os.path.join(self.config["outdir"], f"predictions/{self.steps}steps")
@@ -373,13 +454,12 @@ class Trainer(object):
             r = r.view(-1).cpu().numpy().flatten() # groundtruth
             g = g.view(-1).cpu().numpy().flatten() # generated
             
-            # clip to [-1, 1]
-            r = np.clip(r, -1, 1)
-            g = np.clip(g, -1, 1)
+            # de-emphasis
+            r = _demphasis(r, self.config.get("alpha", 0))
+            g = _demphasis(g, self.config.get("alpha", 0))
             
             # plot figure and save it
-            num_save_results += 1
-            figname = os.path.join(dirname, f"{num_save_results}.png")
+            figname = os.path.join(dirname, f"{idx}.png")
             plt.subplot(2, 1, 1)
             plt.plot(r)
             plt.title("groundtruth speech")
@@ -389,16 +469,15 @@ class Trainer(object):
             plt.tight_layout()
             plt.savefig(figname)
             plt.close()
-            
+
             # save as wavfile
-            sr = 32000
-            sf.write(figname.replace(".png", "_ref.wav"), r, sr, "PCM_16")
-            sf.write(figname.replace(".png", "_gen.wav"), g, sr, "PCM_16")
-            
-            if num_save_results >= self.config["num_save_intermediate_results"]:
+            r = np.clip(r, -1, 1)
+            g = np.clip(g, -1, 1)
+            sf.write(figname.replace(".png", "_ref.wav"), r, self.config["sampling_rate"]*2, "PCM_16")
+            sf.write(figname.replace(".png", "_gen.wav"), g, self.config["sampling_rate"]*2, "PCM_16")
+
+            if idx >= self.config["num_save_intermediate_results"]:
                 break
-        
-        return num_save_results
 
     def _write_to_tensorboard(self, loss):
         """Write to tensorboard."""
@@ -504,15 +583,16 @@ def main():
             logging.info(f"{key} = {value}")
 
     # get dataset
-    train_dataset = AudioSCPDataset(args.train_scp, config["segment_size"])
+    train_dataset = AudioSCPDataset(args.train_scp, config["batch_max_steps"], config["sampling_rate"])
     logging.info(f"The number of training files = {len(train_dataset)}.")
-    dev_dataset = AudioSCPDataset(args.dev_scp, config["segment_size"])
+    dev_dataset = AudioSCPDataset(args.dev_scp, config["batch_max_steps"], config["sampling_rate"])
     logging.info(f"The number of development files = {len(dev_dataset)}.")
     dataset = {
         "train": train_dataset,
         "dev": dev_dataset,
     }
 
+    # get data loader
     sampler = {"train": None, "dev": None}
     if args.distributed:
         # setup sampler for distributed training
@@ -585,8 +665,10 @@ def main():
     
     # define criterion and optimizers
     criterion = {
-        "mae": nn.L1Loss().to(device),
-        "mse": nn.MSELoss().to(device),
+        "stft": MultiResolutionSTFTLoss(
+            **config["stft_loss_params"]).to(device),
+        "mae": torch.nn.L1Loss().to(device),
+        "mse": torch.nn.MSELoss().to(device),
     }
     
     generator_optimizer_class = getattr(fbandext.optimizers, config["generator_optimizer_type"])

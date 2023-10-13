@@ -1,5 +1,5 @@
 
 
-from .resrnnunet import *
+from .nwcnet import *
 from .discriminators import *
 

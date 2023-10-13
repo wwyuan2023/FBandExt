@@ -3,8 +3,9 @@
 
 """Decode with trained vocoder Generator."""
 
-import os, sys
-import torch, torchaudio
+import os
+import torch
+import torch.nn.functional as F
 import yaml
 import numpy as np
 from scipy import signal
@@ -25,7 +26,7 @@ class NeuralFBandExt(object):
     def __init__(self, checkpoint_path=None, config_path=None, device="cpu"):
         
         if checkpoint_path is None:
-            checkpoint_path = os.path.join(fbandext.__path__[0], "checkpoint", "checkpoint.pkl")
+            checkpoint_path = os.path.join(fbandext.__path__[0], "checkpoint", "checkpoint.pth")
     
         # setup config
         if config_path is None:
@@ -34,8 +35,9 @@ class NeuralFBandExt(object):
         with open(config_path) as f:
             self.config = yaml.load(f, Loader=yaml.Loader)
 
-        self.sampling_rate_source = 16000
-        self.sampling_rate_target = 32000
+        self.win_size = self.config["win_size"]
+        self.sampling_rate_source = self.config["sampling_rate"]
+        self.sampling_rate_target = self.config["sampling_rate"] * 2
         
         # setup device
         self.device = torch.device(device)
@@ -50,7 +52,23 @@ class NeuralFBandExt(object):
     
     @torch.no_grad()
     def infer(self, x):
+        # x: (B, 1, T)
+        
+        # padding
+        orig_length = x.size(-1)
+        if orig_length % self.win_size > 0:
+            pad_length = self.win_size - orig_length % self.win_size
+            x = F.pad(x, (0, pad_length))
+        else:
+            pad_length = 0
+        
+        # inference
         y = self.model.infer(x)
+        
+        # cut off
+        if pad_length > 0:
+            y = y[..., :orig_length*self.sampling_rate_target//self.sampling_rate_source]
+        
         return y
 
 
@@ -83,7 +101,7 @@ def main():
     parser.add_argument("--config", "--conf", default=None, type=str,
                         help="yaml format configuration file. if not explicitly provided, "
                              "it will be searched in the checkpoint directory. (default=None)")
-    parser.add_argument("--sampling-rate", "--sr", default=None, type=int,
+    parser.add_argument("--sampling-rate", "--sr", default=32000, type=int,
                         help="target sampling rate for stored wav file.")
     parser.add_argument("--highpass", default=None, type=float,
                         help="highpass filter after inference.")
@@ -132,37 +150,38 @@ def main():
                 utt_id = os.path.splitext(os.path.basename(line))[0]
                 wav_files[utt_id] = line
         logging.info("From {} find {} wav files.".format(args.wav_scp, len(wav_files)))
-    logging.info(f"The number of wav to be denoised = {len(wav_files)}.")
+    logging.info(f"The number of wav to frequency band extend = {len(wav_files)}.")
 
     # start generation
     total_rtf = 0.0
-    with torch.no_grad(), tqdm(wav_files.items(), desc="[denoise]") as pbar:
+    with torch.no_grad(), tqdm(wav_files.items(), desc="[fbandext]") as pbar:
         for idx, (utt_id, wavfn) in enumerate(pbar, 1):
             start = time.time()
             
             # load pcm
             x, sr = sf.read(wavfn, dtype=np.float32) # x: (T, C) or (T,)
-            if sr != model.sampling_rate_source:
-                x = librosa.resample(x, orig_sr=sr, target_sr=model.sampling_rate_source, axis=0)
-            x = x.T if x.ndim == 2 else x.reshape(1, -1) # (B=C, T)
-            x /= abs(x).max()
             
             # inference
-            y = model.infer(torch.from_numpy(x)).cpu().numpy()
-
-            # save as PCM 16 bit wav files
-            y = y.flatten() if y.shape[0] == 1 else y.T # (T, C) or (T,)
-            final_sr = model.sampling_rate_target if args.sampling_rate is None else args.sampling_rate
-            if final_sr != model.sampling_rate_target:
-                y = librosa.resample(y, orig_sr=model.sampling_rate_target, target_sr=final_sr, res_type="scipy", axis=0)
+            if model.sampling_rate_source < args.sampling_rate <= model.sampling_rate_target:
+                if sr != model.sampling_rate_source:
+                    x = librosa.resample(x, orig_sr=sr, target_sr=model.sampling_rate_source, res_type="scipy", axis=0)
+                    sr = model.sampling_rate_source
+                x = x.T if x.ndim == 2 else x.reshape(1, -1) # (B=C, T)
+                x /= abs(x).max()
+                x = model.infer(torch.from_numpy(x).unsqueeze(1)).squeeze(1).cpu().numpy()
+                x = x.flatten() if x.shape[0] == 1 else x.T # (T, C) or (T,)
+                sr = model.sampling_rate_target
+            
+            if args.sampling_rate != sr:
+                x = librosa.resample(x, orig_sr=sr, target_sr=args.sampling_rate, res_type="scipy", axis=0)
             
             if args.highpass is not None:
-                y = butter_highpass_filter(y, final_sr, cuttoff=args.highpass)
+                x = butter_highpass_filter(x, args.sampling_rate, cuttoff=args.highpass)
             
-            sf.write(os.path.join(args.outdir, f"{utt_id}.wav"),
-                y, final_sr, "PCM_16")
+            # save as PCM 16 bit wav files
+            sf.write(os.path.join(args.outdir, f"{utt_id}.wav"), x, args.sampling_rate, "PCM_16")
             
-            rtf = (time.time() - start) / (len(y) / final_sr)
+            rtf = (time.time() - start) / (len(x) / args.sampling_rate)
             pbar.set_postfix({"RTF": rtf})
             total_rtf += rtf
 

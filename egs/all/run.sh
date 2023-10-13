@@ -13,7 +13,7 @@ n_gpus=2       # number of gpus in training
 master_port=34500 
 
 # NOTE(kan-bayashi): renamed to conf to avoid conflict in parse_options.sh
-conf=conf/resrnnunet.yaml
+conf=conf/nwcnet.yaml
 
 # training related setting
 tag=""     # tag for directory to save model
