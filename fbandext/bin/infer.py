@@ -36,8 +36,8 @@ class NeuralFBandExt(object):
             self.config = yaml.load(f, Loader=yaml.Loader)
 
         self.win_size = self.config["win_size"]
-        self.sampling_rate_source = self.config["sampling_rate"]
-        self.sampling_rate_target = self.config["sampling_rate"] * 2
+        self.sr_source = self.config["sampling_rate"]
+        self.sr_target = self.config["sampling_rate"] * 2
         
         # setup device
         self.device = torch.device(device)
@@ -52,7 +52,9 @@ class NeuralFBandExt(object):
     
     @torch.no_grad()
     def infer(self, x):
-        # x: (B, 1, T)
+        # x: (T, C), ndarray
+        
+        x = torch.from_numpy(x.T) # (B=C, T)
         
         # padding
         orig_length = x.size(-1)
@@ -63,13 +65,13 @@ class NeuralFBandExt(object):
             pad_length = 0
         
         # inference
-        y = self.model.infer(x)
-        
+        y = self.model.infer(x.unsqueeze(1)).squeeze(1).cpu().numpy()
+                
         # cut off
         if pad_length > 0:
-            y = y[..., :orig_length*self.sampling_rate_target//self.sampling_rate_source]
+            y = y[..., :orig_length*self.sr_target//self.sr_source]
         
-        return y
+        return y.T # (T, C)
 
 
 def main():
@@ -158,19 +160,19 @@ def main():
         for idx, (utt_id, wavfn) in enumerate(pbar, 1):
             start = time.time()
             
-            # load pcm
+            # load wav
             x, sr = sf.read(wavfn, dtype=np.float32) # x: (T, C) or (T,)
             
             # inference
-            if model.sampling_rate_source < args.sampling_rate <= model.sampling_rate_target:
-                if sr != model.sampling_rate_source:
-                    x = librosa.resample(x, orig_sr=sr, target_sr=model.sampling_rate_source, res_type="scipy", axis=0)
-                    sr = model.sampling_rate_source
-                x = x.T if x.ndim == 2 else x.reshape(1, -1) # (B=C, T)
+            if model.sr_source < args.sampling_rate <= model.sr_target:
+                if sr != model.sr_source:
+                    x = librosa.resample(x, orig_sr=sr, target_sr=model.sr_source, res_type="scipy", axis=0)
+                    sr = model.sr_source
                 x /= abs(x).max()
-                x = model.infer(torch.from_numpy(x).unsqueeze(1)).squeeze(1).cpu().numpy()
-                x = x.flatten() if x.shape[0] == 1 else x.T # (T, C) or (T,)
-                sr = model.sampling_rate_target
+                if x.ndim == 1: x = np.expand_dims(x, axis=1) # (T, C)
+                x = model.infer(x)
+                if x.shape[1] == 1: x = x.flatten() # (T, C) or (T,)
+                sr = model.sr_target
             
             if args.sampling_rate != sr:
                 x = librosa.resample(x, orig_sr=sr, target_sr=args.sampling_rate, res_type="scipy", axis=0)
@@ -178,7 +180,7 @@ def main():
             if args.highpass is not None:
                 x = butter_highpass_filter(x, args.sampling_rate, cuttoff=args.highpass)
             
-            # save as PCM 16 bit wav files
+            # save wav
             sf.write(os.path.join(args.outdir, f"{utt_id}.wav"), x, args.sampling_rate, "PCM_16")
             
             rtf = (time.time() - start) / (len(x) / args.sampling_rate)
