@@ -191,6 +191,7 @@ class Decoder(nn.Module):
         self.upsample_factors = upsample_factors
         self.code_size = code_size
         self.code_bits = code_bits
+        self.Q = int(2**(code_bits-1))
         self.context_window = context_window
         self.kernel_size = sum(context_window) + 1
         self.embed_size = embed_size
@@ -198,7 +199,7 @@ class Decoder(nn.Module):
         
         self.embedding = nn.Embedding(int(2**code_bits), embed_size//code_size)
         self.conv = nn.Sequential(
-            nn.Conv1d(code_size, embed_size, self.kernel_size, bias=False, padding=self.kernel_size//2),
+            nn.Conv1d(code_size, embed_size, self.kernel_size, bias=False),
             ChannelNorm(embed_size),
             nn.ReLU(),
         )
@@ -250,19 +251,14 @@ class Decoder(nn.Module):
     
     def forward(self, x):
         # x: (B, C, T)
-        batch_size = x.size(0)
-        
-        # padding
-        x = F.pad(x, self.context_window)
+        B, _, T = x.size()
         
         # embedding
-        start = self.context_window[0]
-        end = -self.context_window[1] if self.context_window[1] > 0 else None
-        Q = int(2**(self.code_bits-1))
-        q = torch.clamp(x[...,start:end], min=-1, max=0.999) * Q # (B, C, T)
-        q = q.long() + Q # [-Q, Q) -> [0, 2*Q)
-        qe = self.embedding(q).transpose(2, 3).reshape(batch_size, self.embed_size, -1) # (B, E, T)
+        q = torch.clamp(x, min=-1, max=0.999) * self.Q # (B, C, T)
+        q = q.long() + self.Q # [-Q, Q) -> [0, 2*Q)
+        qe = self.embedding(q).transpose(2, 3).reshape(B, self.embed_size, T) # (B, E, T)
         
+        x = F.pad(x, self.context_window)
         xe = self.conv(x) # (B, E, T)
         x = xe + qe
         
@@ -283,7 +279,7 @@ class NWCNet(nn.Module):
         upsample_factors=(4, 4, 4, 5),
         code_size=20,
         code_bits=8,
-        context_window=(4,0),
+        context_window=(2,2),
         encoder_params={
             "in_channels": 64,
             "conv_channels": [32, 64, 128, 256],
@@ -308,7 +304,7 @@ class NWCNet(nn.Module):
             "act_params": {},
             "act_func_transition": "Tanh",
             "act_params_transition": {},
-            "padding_mode": "causal",
+            "padding_mode": "same",
             "conv_class_name": "_LightConv1d",
         },
         pqmf_params={
@@ -373,7 +369,8 @@ class NWCNet(nn.Module):
         var, mean = torch.var_mean(e.reshape(-1), dim=0)
         
         # synthesis
-        x_hat[:, 0] = x_hat[:, 0] + x
+        x = F.pad(x, [0, 0, 0, 1])
+        x_hat = x_hat + x
         y_hat = self.pqmf.synthesis(x_hat)
         
         return y_hat, (mean, var)
@@ -389,7 +386,7 @@ class NWCNet(nn.Module):
         x_hat = self.decoder(e) # (B, 1, T)
         
         # synthesis
-        x_hat[:, 0] = x_hat[:, 0] + x
+        x_hat[:, 0:1] += x
         y_hat = self.pqmf.synthesis(x_hat)
         
         return y_hat

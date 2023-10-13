@@ -83,7 +83,7 @@ class AudioSCPDataset(Dataset):
         y = y[start:start+self.segment_size*self.r]
         
         # downsample
-        res_types = ['soxr_hq', 'soxr_mq', 'soxr_lq', 'fft', 'fft', 'fft']
+        res_types = ['soxr_mq', 'soxr_hq', 'soxr_vhq', 'fft', 'fft', 'fft']
         idx = np.random.randint(len(res_types))
         x = librosa.resample(y, orig_sr=self.sr_target, target_sr=self.sr_source, res_type=res_types[idx])
         assert len(x) * self.r == len(y), f"len(x)={len(x)}, len(y)={len(y)}\n"

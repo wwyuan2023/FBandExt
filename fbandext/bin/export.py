@@ -52,8 +52,7 @@ def main():
     # load config
     config_path = args.config
     if config_path is None:
-        dirname = args.checkpoint if os.path.isdir(args.checkpoint) else \
-            os.path.dirname(args.checkpoint)
+        dirname = os.path.dirname(args.checkpoint[0])
         config_path = os.path.join(dirname, "config.yml")
     with open(config_path) as f:
         config = yaml.load(f, Loader=yaml.Loader)
@@ -76,21 +75,18 @@ def main():
     config["version"] = fbandext.__version__   # add version info
     with open(os.path.join(args.outdir, "config.yml"), "w") as f:
         yaml.dump(config, f, Dumper=yaml.Dumper)
-    for key, value in config.items():
-        logging.info(f"{key} = {value}")
     
     # print parameters
-    logging.info(model)
     total_params = sum([np.prod(p.size()) for p in model.parameters()])
     logging.info(f"Total parameters: {total_params}")
     
     # save model to outdir
-    checkpoint_path = os.path.join(args.outdir, "checkpoint.pth")
+    checkpoint_path = os.path.join(args.outdir, "checkpoint.pkl")
     state_dict = {
         "model": {"generator": model.state_dict()}
     }
     torch.save(state_dict, checkpoint_path)
-    logging.info(f"Successfully export model parameters from [{args.checkpoint}] to [{checkpoint_path}].")
+    logging.info(f"Successfully export model parameters from {args.checkpoint} to [{checkpoint_path}].")
 
 
 if __name__ == "__main__":

@@ -408,15 +408,7 @@ class Trainer(object):
         for key in self.total_eval_loss.keys():
             self.total_eval_loss[key] /= eval_steps_per_epoch
             logging.info(f"(Steps: {self.steps}) {key} = {self.total_eval_loss[key]:.4f}.")
-        
-        # calculate average bitrate
-        statabr_class = getattr(self.model["generator"].module, "statabr", None)
-        if statabr_class is not None:
-            abr, props = statabr_class.calc_abr()
-            self.total_eval_loss["eval/abr"] = abr
-            logging.info(f"(Steps: {self.steps}) eval/abr = {abr:.2f}.")
-            statabr_class.reset()
-        
+                
         # record
         self._write_to_tensorboard(self.total_eval_loss)
 

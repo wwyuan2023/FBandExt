@@ -26,7 +26,7 @@ class NeuralFBandExt(object):
     def __init__(self, checkpoint_path=None, config_path=None, device="cpu"):
         
         if checkpoint_path is None:
-            checkpoint_path = os.path.join(fbandext.__path__[0], "checkpoint", "checkpoint.pth")
+            checkpoint_path = os.path.join(fbandext.__path__[0], "checkpoint", "checkpoint.pkl")
     
         # setup config
         if config_path is None:
