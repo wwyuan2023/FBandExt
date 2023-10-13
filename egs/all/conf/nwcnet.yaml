@@ -6,12 +6,8 @@
 
 sampling_rate: &sampling_rate
     16000
-win_size: &win_size
-    960
-hop_size: &hop_size
-    320
 downsample_factors: &downsample_factors
-    - 5
+    - 4
     - 4
     - 4
     - 4
@@ -19,9 +15,9 @@ upsample_factors: &upsample_factors
     - 4
     - 4
     - 4
-    - 5
+    - 4
 code_size: &code_size
-    20
+    16
 code_bits: &code_bits
     8
 context_window: &context_window
@@ -40,8 +36,6 @@ stft_params: &stft_params
 generator_type: "NWCNet"
 generator_params:
     sampling_rate: *sampling_rate
-    win_size: *win_size
-    hop_size: *hop_size
     downsample_factors: *downsample_factors
     upsample_factors: *downsample_factors
     code_size: *code_size
@@ -50,8 +44,8 @@ generator_params:
     encoder_params:
         in_channels: 64
         conv_channels: [32, 64, 128, 256]
-        conv_kernel_size: [9, 7, 7, 1]
-        conv_dilation: [[1,], [1,], [1,], [1,]]
+        conv_kernel_size: [9, 7, 5, 3]
+        conv_dilation: [[1,1,1], [1,1,1], [1,1,1], [1,1,1]]
         conv_groups: [1, 2, 4, 8]
         act_func: "ReLU"
         act_params:
@@ -61,7 +55,7 @@ generator_params:
         padding_mode: "same"
         conv_class_name: "_LightConv1d"
     decoder_params:
-        embed_size: 640
+        embed_size: 1024
         in_channels: 64
         conv_channels: [256, 128, 64, 32]
         conv_kernel_size: [5, 7, 11, 17]
@@ -128,7 +122,7 @@ num_workers: 8
 generator_optimizer_type: "AdamW"
 generator_optimizer_params:
     lr: 0.0002
-    weight_decay: 0.0
+    weight_decay: 0.01
 
 generator_scheduler_type: "StepLR"
 generator_scheduler_params:

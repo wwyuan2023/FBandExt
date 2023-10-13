@@ -232,9 +232,9 @@ class Decoder(nn.Module):
         
         self.scale_out = nn.Sequential(
             nn.PReLU(init=0.142),
-            nn.Conv1d(in_channels, 16, 17, padding=17//2),
+            nn.Conv1d(in_channels, 32, 17, padding=17//2),
             nn.PReLU(init=0.142),
-            nn.Conv1d(16, 2, 1),
+            nn.Conv1d(32, 2, 1),
             nn.Tanh(),
         )
         
@@ -273,10 +273,8 @@ class NWCNet(nn.Module):
     def __init__(
         self,
         sampling_rate=16000,
-        win_size=640,
-        hop_size=320,
-        downsample_factors=(5, 4, 4, 4),
-        upsample_factors=(4, 4, 4, 5),
+        downsample_factors=(4, 4, 4, 4),
+        upsample_factors=(4, 4, 4, 4),
         code_size=20,
         code_bits=8,
         context_window=(2,2),
@@ -315,12 +313,8 @@ class NWCNet(nn.Module):
         use_weight_norm=False,
     ):
         super().__init__()
-        assert np.prod(downsample_factors) == np.prod(upsample_factors) == hop_size
         assert all([ x>=0 for x in context_window])
         self.sampling_rate = sampling_rate
-        self.win_size = win_size
-        self.hop_size = hop_size
-        self.ola_size = win_size - hop_size
         self.code_size = code_size
         self.code_bits = code_bits
         self.context_window = context_window
