@@ -4,15 +4,17 @@
 #                FEATURE EXTRACTION SETTING               #
 ###########################################################
 
-sampling_rate: &sampling_rate
+sampling_rate_source: &sampling_rate_source
     16000
+sampling_rate_target: &sampling_rate_target
+    32000
 downsample_factors: &downsample_factors
     - 4
     - 4
     - 4
-    - 4
+    - 8
 upsample_factors: &upsample_factors
-    - 4
+    - 8
     - 4
     - 4
     - 4
@@ -25,9 +27,9 @@ context_window: &context_window
     - 2
 
 stft_params: &stft_params
-    fft_sizes: [128, 256, 512, 1024]
-    hop_sizes: [32, 64, 128, 256]
-    win_sizes: [128, 256, 512, 1024]
+    fft_sizes: [128, 256, 512, 1024, 2048]
+    hop_sizes: [32, 64, 128, 256, 512]
+    win_sizes: [128, 256, 512, 1024, 2048]
     window: "hann_window"
 
 ###########################################################
@@ -35,7 +37,6 @@ stft_params: &stft_params
 ###########################################################
 generator_type: "NWCNet"
 generator_params:
-    sampling_rate: *sampling_rate
     downsample_factors: *downsample_factors
     upsample_factors: *downsample_factors
     code_size: *code_size
@@ -69,10 +70,6 @@ generator_params:
             init: 0.142
         padding_mode: "same"
         conv_class_name: "_LightConv1d"
-    pqmf_params:
-        subbands: 2
-        taps: 14
-        beta: 8.0
     use_weight_norm: true
 
 ###########################################################
@@ -81,16 +78,16 @@ generator_params:
 discriminator_type: "MultiWaveSTFTDiscriminator"
 discriminator_params:
     multi_wave_discriminator_params:
-        num_dwt: 4
+        num_dwt: 5
         kernel_size: 5
         layers: 8
         conv_channels: 64
         use_weight_norm: true
     multi_stft_discriminator_params:
         <<: *stft_params
-        num_layers: [4, 5, 6, 7]
-        kernel_sizes: [5, 5, 5, 5]
-        conv_channels: [64, 64, 64, 64]
+        num_layers: [4, 5, 6, 7, 8]
+        kernel_sizes: [5, 5, 5, 5, 5]
+        conv_channels: [64, 64, 64, 64, 64]
         use_weight_norm: false
 
 ###########################################################
@@ -110,8 +107,8 @@ lambda_punish: 0.001
 ###########################################################
 #                  DATA LOADER SETTING                    #
 ###########################################################
-batch_size: 16
-batch_max_steps: 32000
+batch_size: 32
+batch_max_steps: 65536
 pin_memory: true
 num_workers: 8
 

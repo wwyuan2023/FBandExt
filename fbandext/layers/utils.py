@@ -11,6 +11,23 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+class Transpose(nn.Module):
+
+    __constants__ = ['dims']
+    dims: list
+
+    def __init__(self, dims=[1,-1]):
+        super(Transpose, self).__init__()
+        self.dims = dims
+
+    def forward(self, input):
+        # input: (B,...)
+        return input.transpose(*self.dims)
+
+    def extra_repr(self):
+        return '{dims}'.format(**self.__dict__)
+
+
 class ChannelNorm(nn.Module):
 
     __constants__ = ['num_channels', 'eps', 'affine']

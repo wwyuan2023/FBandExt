@@ -8,6 +8,7 @@ import torch
 import torch.nn.functional as F
 import yaml
 import numpy as np
+import librosa
 from scipy import signal
 
 import fbandext
@@ -35,9 +36,9 @@ class NeuralFBandExt(object):
         with open(config_path) as f:
             self.config = yaml.load(f, Loader=yaml.Loader)
 
-        self.win_size = self.config["win_size"]
-        self.sr_source = self.config["sampling_rate"]
-        self.sr_target = self.config["sampling_rate"] * 2
+        self.hop_size = np.prod(self.config["downsample_factors"])
+        self.sampling_rate_source = self.config["sampling_rate_source"]
+        self.sampling_rate_target = self.config["sampling_rate_target"]
         
         # setup device
         self.device = torch.device(device)
@@ -52,14 +53,14 @@ class NeuralFBandExt(object):
     
     @torch.no_grad()
     def infer(self, x):
-        # x: (T, C), ndarray
-        
+        # x: (C, T), ndarray
+        x = librosa.resample(x, orig_sr=self.sampling_rate_source, target_sr=self.sampling_rate_target, res_type="scipy", axis=1)
         x = torch.from_numpy(x.T) # (B=C, T)
         
         # padding
         orig_length = x.size(-1)
-        if orig_length % self.win_size > 0:
-            pad_length = self.win_size - orig_length % self.win_size
+        if orig_length % self.hop_size > 0:
+            pad_length = self.hop_size - orig_length % self.hop_size
             x = F.pad(x, (0, pad_length))
         else:
             pad_length = 0
@@ -69,9 +70,9 @@ class NeuralFBandExt(object):
                 
         # cut off
         if pad_length > 0:
-            y = y[..., :orig_length*self.sr_target//self.sr_source]
+            y = y[..., :orig_length]
         
-        return y.T # (T, C)
+        return y # (C, T)
 
 
 def main():
@@ -80,7 +81,6 @@ def main():
     import logging
     import time
     import soundfile as sf
-    import librosa
     
     from tqdm import tqdm
     from fbandext.utils import find_files
@@ -164,15 +164,15 @@ def main():
             x, sr = sf.read(wavfn, dtype=np.float32) # x: (T, C) or (T,)
             
             # inference
-            if model.sr_source < args.sampling_rate <= model.sr_target:
-                if sr != model.sr_source:
-                    x = librosa.resample(x, orig_sr=sr, target_sr=model.sr_source, res_type="scipy", axis=0)
-                    sr = model.sr_source
+            if model.sampling_rate_source < args.sampling_rate <= model.sampling_rate_target:
+                if sr != model.sampling_rate_source:
+                    x = librosa.resample(x, orig_sr=sr, target_sr=model.sampling_rate_source, res_type="scipy", axis=0)
+                    sr = model.sampling_rate_source
                 x /= abs(x).max()
-                if x.ndim == 1: x = np.expand_dims(x, axis=1) # (T, C)
-                x = model.infer(x)
-                if x.shape[1] == 1: x = x.flatten() # (T, C) or (T,)
-                sr = model.sr_target
+                x = x.T if x.ndim > 1 else np.expand_dims(x, axis=1) # (C, T)
+                x = model.infer(x) # (B=C, T)
+                x = x.T if x.shape[0] > 1 else x.flatten() # (T, C) or (T,)
+                sr = model.sampling_rate_target
             
             if args.sampling_rate != sr:
                 x = librosa.resample(x, orig_sr=sr, target_sr=args.sampling_rate, res_type="scipy", axis=0)

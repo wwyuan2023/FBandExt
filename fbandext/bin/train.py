@@ -175,13 +175,13 @@ class Trainer(object):
     def _train_step(self, batch):
         """Train model one step."""
         # parse batch
-        x = batch[0].to(self.device) # 16kHz PCM
-        y = batch[1].to(self.device) # 32kHz PCM
+        x = batch[0].to(self.device) # actually 16kHz PCM
+        y = batch[1].to(self.device) # real 32kHz PCM
         
         #######################
         #      Generator      #
         #######################    
-        y_, outputs = self.model["generator"](x, self.steps)
+        y_, outputs = self.model["generator"](x)
         gen_loss = 0.0
         
         # stfts
@@ -310,8 +310,8 @@ class Trainer(object):
     def _eval_step(self, batch):
         """Evaluate model one step."""
         # parse batch
-        x = batch[0].to(self.device) # 16kHz PCM
-        y = batch[1].to(self.device) # 32kHz PCM
+        x = batch[0].to(self.device) # actually 16kHz PCM
+        y = batch[1].to(self.device) # real 32kHz PCM
         
         #######################
         #      Generator      #
@@ -465,8 +465,8 @@ class Trainer(object):
             # save as wavfile
             r = np.clip(r, -1, 1)
             g = np.clip(g, -1, 1)
-            sf.write(figname.replace(".png", "_ref.wav"), r, self.config["sampling_rate"]*2, "PCM_16")
-            sf.write(figname.replace(".png", "_gen.wav"), g, self.config["sampling_rate"]*2, "PCM_16")
+            sf.write(figname.replace(".png", "_ref.wav"), r, self.config["sampling_rate_target"], "PCM_16")
+            sf.write(figname.replace(".png", "_gen.wav"), g, self.config["sampling_rate_target"], "PCM_16")
 
             if idx >= self.config["num_save_intermediate_results"]:
                 break
@@ -575,9 +575,9 @@ def main():
             logging.info(f"{key} = {value}")
 
     # get dataset
-    train_dataset = AudioSCPDataset(args.train_scp, config["batch_max_steps"], config["sampling_rate"])
+    train_dataset = AudioSCPDataset(args.train_scp, config["batch_max_steps"], config["sampling_rate_target"])
     logging.info(f"The number of training files = {len(train_dataset)}.")
-    dev_dataset = AudioSCPDataset(args.dev_scp, config["batch_max_steps"], config["sampling_rate"])
+    dev_dataset = AudioSCPDataset(args.dev_scp, config["batch_max_steps"], config["sampling_rate_target"])
     logging.info(f"The number of development files = {len(dev_dataset)}.")
     dataset = {
         "train": train_dataset,

@@ -41,15 +41,16 @@ class AudioSCPDataset(Dataset):
         self,
         wav_scpfn,
         segment_size,
-        sampling_rate=16000,
+        sampling_rate_source=16000,
+        sampling_rate_target=32000,
         return_utt_id=False,
         num_repeat=1,
     ):
         """Initialize dataset.
         """
-        self.r = 2
-        self.sr_source = sampling_rate
-        self.sr_target = sampling_rate * self.r
+        self.sr_source = sampling_rate_source
+        self.sr_target = sampling_rate_target
+        self.r = sampling_rate_target / sampling_rate_source
         self.segment_size = int(segment_size)
         
         wavfn_list = []
@@ -74,20 +75,22 @@ class AudioSCPDataset(Dataset):
         y /= abs(y).max()
         
         # adjust length
-        if len(y) <= self.segment_size * self.r:
-            pad = self.segment_size * self.r - len(y) + 256
+        if len(y) <= self.segment_size:
+            pad = self.segment_size - len(y) + 256
             y = np.pad(y, [pad//2, pad-pad//2], mode='reflect')
         
         # random slice segment
-        start = np.random.randint(0, len(y) - self.segment_size*self.r)
-        y = y[start:start+self.segment_size*self.r]
+        start = np.random.randint(0, len(y) - self.segment_size)
+        y = y[start:start+self.segment_size]
         
         # downsample
-        res_types = ['soxr_mq', 'soxr_hq', 'soxr_vhq', 'fft', 'fft', 'fft']
-        idx = np.random.randint(len(res_types))
-        x = librosa.resample(y, orig_sr=self.sr_target, target_sr=self.sr_source, res_type=res_types[idx])
-        assert len(x) * self.r == len(y), f"len(x)={len(x)}, len(y)={len(y)}\n"
+        res_types = ['soxr_mq', 'soxr_hq', 'soxr_vhq', 'scipy', 'scipy', 'scipy']
+        x = librosa.resample(y, orig_sr=self.sr_target, target_sr=self.sr_source, res_type=res_types[np.random.randint(len(res_types))], axis=0)
         x = np.clip(x, -1., 1.)
+        assert len(x) * self.r == len(y), f"len(x)={len(x)}, len(y)={len(y)}\n"
+        x = librosa.resample(x, orig_sr=self.sr_source, target_sr=self.sr_target, res_type="scipy", axis=0)
+        x = np.clip(x, -1., 1.)
+        assert len(x) == len(y), f"len(x)={len(x)}, len(y)={len(y)}\n"
         
         return x, y
     
@@ -100,7 +103,7 @@ class AudioSCPDataset(Dataset):
         Returns:
             str: Utterance id (only in return_utt_id = True).
             tensor: source audio signal (1, T).
-            tensor: target audio signal (1, T*2).
+            tensor: target audio signal (1, T).
 
         """
         wavfn = self.wavfn_list[idx]

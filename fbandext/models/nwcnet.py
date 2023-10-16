@@ -6,7 +6,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from fbandext.layers import PQMF
-from fbandext.layers import ChannelNorm
+from fbandext.layers import Transpose, ChannelNorm
 
 
 class _LightConv1d(nn.Module):
@@ -38,19 +38,21 @@ class _LightConv1d(nn.Module):
         
         self.convs = nn.Sequential(
             getattr(torch.nn, act_func_transition)(**act_params_transition),
-            nn.Conv1d(in_channels, conv_channels, 1),
-            ChannelNorm(conv_channels),
+            nn.Linear(in_channels, conv_channels),
+            nn.LayerNorm(conv_channels),
             getattr(torch.nn, act_func)(**act_params),
+            Transpose(),
             nn.ConstantPad1d(padding, 0.0) if padding is not None else nn.Identity(),
             nn.Conv1d(conv_channels, conv_channels, conv_kernel_size, dilation=conv_dilation, groups=conv_groups),
-            ChannelNorm(conv_channels),
+            Transpose(),
+            nn.LayerNorm(conv_channels),
             getattr(torch.nn, act_func_transition)(**act_params_transition),
-            nn.Conv1d(conv_channels, in_channels, 1),
+            nn.Linear(conv_channels, in_channels),
         )
-        self.norm = ChannelNorm(in_channels)
+        self.norm = nn.LayerNorm(in_channels)
     
     def forward(self, x):
-        # x: (B, C, T)
+        # x: (B, T, C)
         x = x + self.convs(x)
         x = self.norm(x)
         return x
@@ -61,12 +63,14 @@ class _Downsample(nn.Module):
         self.factor = factor
         self.conv = nn.Sequential(
             getattr(torch.nn, act_func_transition)(**act_params_transition),
+            Transpose(),
             nn.Conv1d(in_channels, in_channels, factor, stride=factor),
+            Transpose(),
         )
         
     def forward(self, x):
-        # x: (B, C, T)
-        x = self.conv(x) # (B, C, T//factor)
+        # x: (B, T, C)
+        x = self.conv(x) # (B, T//factor, C)
         return x
 
 class _Upsample(nn.Module):
@@ -75,12 +79,14 @@ class _Upsample(nn.Module):
         self.factor = factor
         self.conv = nn.Sequential(
             getattr(torch.nn, act_func_transition)(**act_params_transition),
+            Transpose(),
             nn.ConvTranspose1d(in_channels, in_channels, factor, stride=factor),
+            Transpose(),
         )
         
     def forward(self, x):
-        # x: (B, C, T)
-        x = self.conv(x) # (B, C, T*factor)
+        # x: (B, T, C)
+        x = self.conv(x) # (B, T*factor, C)
         return x
 
 class Encoder(nn.Module):
@@ -108,7 +114,7 @@ class Encoder(nn.Module):
         self.code_size = code_size
         self.code_bits = code_bits
         
-        self.scale_in = nn.Conv1d(1, in_channels, 1)
+        self.scale_in = nn.Linear(1, in_channels)
         
         convnet = []
         conv_class = globals()[conv_class_name]
@@ -133,8 +139,8 @@ class Encoder(nn.Module):
         
         self.scale_out = nn.Sequential(
             nn.Tanh(),
-            nn.Conv1d(in_channels, code_size, 1),
-            ChannelNorm(code_size) if code_size > 1 else nn.Identity(),
+            nn.Linear(in_channels, code_size, 1),
+            nn.LayerNorm(code_size) if code_size > 1 else nn.Identity(),
             nn.Tanh(),
         )
         
@@ -159,9 +165,9 @@ class Encoder(nn.Module):
     
     def forward(self, x):
         # x: (B, 1, t), audio waveform, float32, range to [-1, 1]
-        x = self.scale_in(x)
+        x = self.scale_in(x.transpose(1,-1))
         x = self.convnet(x)
-        x = self.scale_out(x)
+        x = self.scale_out(x).transpose(1,-1)
         
         e, q = self.quantize(x, self.code_bits - 1) # (B, code_size, t)
         return e, q
@@ -200,13 +206,14 @@ class Decoder(nn.Module):
         self.embedding = nn.Embedding(int(2**code_bits), embed_size//code_size)
         self.conv = nn.Sequential(
             nn.Conv1d(code_size, embed_size, self.kernel_size, bias=False),
-            ChannelNorm(embed_size),
+            Transpose(),
+            nn.LayerNorm(embed_size),
             nn.ReLU(),
         )
         
         self.scale_in = nn.Sequential(
-            nn.Conv1d(embed_size, in_channels, 1),
-            ChannelNorm(in_channels),
+            nn.Linear(embed_size, in_channels),
+            nn.LayerNorm(in_channels),
         )
         
         convnet = []
@@ -232,9 +239,10 @@ class Decoder(nn.Module):
         
         self.scale_out = nn.Sequential(
             nn.PReLU(init=0.142),
-            nn.Conv1d(in_channels, 32, 17, padding=17//2),
+            Transpose(),
+            nn.Conv1d(in_channels, 16, 17, padding=17//2),
             nn.PReLU(init=0.142),
-            nn.Conv1d(32, 2, 1),
+            nn.Conv1d(16, 1, 1),
             nn.Tanh(),
         )
         
@@ -253,36 +261,34 @@ class Decoder(nn.Module):
         # x: (B, C, T)
         B, _, T = x.size()
         
-        # embedding
-        q = torch.clamp(x, min=-1, max=0.999) * self.Q # (B, C, T)
+        # embedding       
+        q = torch.clamp(x.transpose(1,-1), min=-1, max=0.999) * self.Q # (B, T, C)
         q = q.long() + self.Q # [-Q, Q) -> [0, 2*Q)
-        qe = self.embedding(q).transpose(2, 3).reshape(B, self.embed_size, T) # (B, E, T)
+        qe = self.embedding(q).reshape(B, T, self.embed_size) # (B, T, E)
         
-        x = F.pad(x, self.context_window)
-        xe = self.conv(x) # (B, E, T)
+        xe = self.conv(F.pad(x, self.context_window)) # (B, T, E)
         x = xe + qe
         
         # convs
         x = self.scale_in(x)
         x = self.convnet(x)
-        x = self.scale_out(x) # (B, 2, T*self.frame_size)
+        x = self.scale_out(x) # (B, 1, T*self.frame_size)
         
         return x
 
 class NWCNet(nn.Module):
     def __init__(
         self,
-        sampling_rate=16000,
-        downsample_factors=(4, 4, 4, 4),
-        upsample_factors=(4, 4, 4, 4),
-        code_size=20,
+        downsample_factors=(4, 4, 4, 8),
+        upsample_factors=(8, 4, 4, 4),
+        code_size=16,
         code_bits=8,
         context_window=(2,2),
         encoder_params={
             "in_channels": 64,
             "conv_channels": [32, 64, 128, 256],
-            "conv_kernel_size": [9, 7, 7, 1],
-            "conv_dilation": [[1,], [1,], [1,], [1,]],
+            "conv_kernel_size": [9, 7, 5, 3],
+            "conv_dilation": [[1,1,1], [1,1,1], [1,1,1], [1,1,1]],
             "conv_groups": [1, 2, 4, 8],
             "act_func": "ReLU",
             "act_params": {},
@@ -292,7 +298,7 @@ class NWCNet(nn.Module):
             "conv_class_name": "_LightConv1d",
         },
         decoder_params={
-            "embed_size": 640,
+            "embed_size": 1024,
             "in_channels": 64,
             "conv_channels": [256, 128, 64, 32],
             "conv_kernel_size": [5, 7, 11, 17],
@@ -305,16 +311,10 @@ class NWCNet(nn.Module):
             "padding_mode": "same",
             "conv_class_name": "_LightConv1d",
         },
-        pqmf_params={
-            "subbands": 2,
-            "taps": 14,
-            "beta": 8.0,
-        },
         use_weight_norm=False,
     ):
         super().__init__()
         assert all([ x>=0 for x in context_window])
-        self.sampling_rate = sampling_rate
         self.code_size = code_size
         self.code_bits = code_bits
         self.context_window = context_window
@@ -324,10 +324,7 @@ class NWCNet(nn.Module):
         
         # decoder network
         self.decoder = Decoder(upsample_factors, code_size, code_bits, context_window, **decoder_params)
-        
-        # pqmf
-        self.pqmf = PQMF(**pqmf_params)
-        
+                
         # apply weight norm
         if use_weight_norm:
             self.apply_weight_norm()
@@ -350,39 +347,32 @@ class NWCNet(nn.Module):
 
         self.apply(_apply_weight_norm)
     
-    def forward(self, x, steps=0):
-        # x: (B, c=1, T), c=audio channel, T=audio length
+    def forward(self, x):
+        # x: (B, c=1, t), c=audio channel, t=audio length
         
         # encoder
-        e, _ = self.encoder(x) # e: (B, E, T)
+        e, _ = self.encoder(x) # e: (B, E, T), T=frame
         
         # decoder
-        x_hat = self.decoder(e) # (B, 2, T)
+        x_hat = self.decoder(e) # (B, 1, t)
+        y_hat = x_hat + x
         
         # statistic 
         var, mean = torch.var_mean(e.reshape(-1), dim=0)
-        
-        # synthesis
-        x = F.pad(x, [0, 0, 0, 1])
-        x_hat = x_hat + x
-        y_hat = self.pqmf.synthesis(x_hat)
         
         return y_hat, (mean, var)
     
     @torch.no_grad()
     def infer(self, x):
-        # x: (B, c=1, T), c=audio channel, T=audio length
+        # x: (B, c=1, t), c=audio channel, t=audio length
         
         # encoder
-        e, _ = self.encoder(x) # e: (B, E, T)
+        e, _ = self.encoder(x) # e: (B, E, T), T=frame
         
         # decoder
-        x_hat = self.decoder(e) # (B, 1, T)
-        
-        # synthesis
-        x_hat[:, 0:1] += x
-        y_hat = self.pqmf.synthesis(x_hat)
-        
+        x_hat = self.decoder(e) # (B, 1, t)
+        y_hat = x_hat + x
+                
         return y_hat
 
 
