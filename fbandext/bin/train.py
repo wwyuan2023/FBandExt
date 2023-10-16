@@ -159,18 +159,16 @@ class Trainer(object):
         x = x.squeeze(1)
         
         # stft
-        specs, mags = [], []
+        mags = []
         for fft_size, hop_size, win_size, window in zip(self.fft_sizes, self.hop_sizes, self.win_sizes, self.windows):
             spec = torch.stft(x, 
                 n_fft=fft_size, hop_length=hop_size, win_length=win_size, window=window,
-                center=True, pad_mode='reflect', return_complex=False) # (B, F, T, 2); F=n_fft//2+1, T=t//hop_size+1
-            real, imag = spec[..., 0], spec[..., 1]
-            # NOTE(kan-bayashi): clamp is needed to avoid nan or inf
-            mag = torch.sqrt(torch.clamp(real**2 + imag**2, min=1e-7)) # (B, F, T)
-            specs.append(spec) # (B, F, T, 2)
+                center=True, pad_mode='reflect', return_complex=True) # (B, F, T); F=n_fft//2+1, T=t//hop_size+1
+            real, imag = spec.real, spec.imag
+            mag = torch.sqrt(real**2 + imag**2 + 1e-7) # (B, F, T)
             mags.append(mag) # (B, F, T)
         
-        return specs, mags
+        return mags
     
     def _train_step(self, batch):
         """Train model one step."""
@@ -182,18 +180,15 @@ class Trainer(object):
         #      Generator      #
         #######################    
         y_, outputs = self.model["generator"](x)
-        gen_loss = 0.0
         
         # stfts
-        _, y_mags = self._stfts(y)
-        _, y_mags_ = self._stfts(y_)
+        y_mags, y_mags_ = self._stfts(y), self._stfts(y_)
         
         # multi-resolution stft loss
-        if self.config.get("lambda_stft", 0) > 0:
-            sc_loss, mag_loss = self.criterion["stft"](y_mags_, y_mags)
-            self.total_train_loss["train/spectral_convergence_loss"] += sc_loss.item()
-            self.total_train_loss["train/log_stft_magnitude_loss"] += mag_loss.item()
-            gen_loss += self.config["lambda_stft"] * (sc_loss + mag_loss)
+        sc_loss, mag_loss = self.criterion["stft"](y_mags_, y_mags)
+        self.total_train_loss["train/spectral_convergence_loss"] += sc_loss.item()
+        self.total_train_loss["train/log_stft_magnitude_loss"] += mag_loss.item()
+        gen_loss = self.config["lambda_stft"] * (sc_loss + mag_loss)
                 
         # make sure the coding are nearly Normal
         mean, var = outputs[0], outputs[1]
@@ -317,18 +312,15 @@ class Trainer(object):
         #      Generator      #
         #######################
         y_, outputs = self.model["generator"](x)
-        gen_loss = 0.0
         
         # stfts
-        _, y_mags = self._stfts(y)
-        _, y_mags_ = self._stfts(y_)
+        y_mags, y_mags_ = self._stfts(y), self._stfts(y_)
         
         # multi-resolution stft loss
-        if self.config.get("lambda_stft", 0) > 0:
-            sc_loss, mag_loss = self.criterion["stft"](y_mags_, y_mags)
-            self.total_eval_loss["eval/spectral_convergence_loss"] += sc_loss.item()
-            self.total_eval_loss["eval/log_stft_magnitude_loss"] += mag_loss.item()
-            gen_loss = self.config["lambda_stft"] * (sc_loss + mag_loss)
+        sc_loss, mag_loss = self.criterion["stft"](y_mags_, y_mags)
+        self.total_eval_loss["eval/spectral_convergence_loss"] += sc_loss.item()
+        self.total_eval_loss["eval/log_stft_magnitude_loss"] += mag_loss.item()
+        gen_loss = self.config["lambda_stft"] * (sc_loss + mag_loss)
                 
         # make sure the coding are nearly Normal
         mean, var = outputs[0], outputs[1]
@@ -575,9 +567,14 @@ def main():
             logging.info(f"{key} = {value}")
 
     # get dataset
-    train_dataset = AudioSCPDataset(args.train_scp, config["batch_max_steps"], config["sampling_rate_target"])
+    dataset_params = {
+        "segment_size": config["batch_max_steps"],
+        "sampling_rate_source": config["sampling_rate_source"],
+        "sampling_rate_target": config["sampling_rate_target"],
+    }
+    train_dataset = AudioSCPDataset(args.train_scp, **dataset_params)
     logging.info(f"The number of training files = {len(train_dataset)}.")
-    dev_dataset = AudioSCPDataset(args.dev_scp, config["batch_max_steps"], config["sampling_rate_target"])
+    dev_dataset = AudioSCPDataset(args.dev_scp, **dataset_params)
     logging.info(f"The number of development files = {len(dev_dataset)}.")
     dataset = {
         "train": train_dataset,
