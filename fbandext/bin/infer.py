@@ -55,7 +55,7 @@ class NeuralFBandExt(object):
     def infer(self, x):
         # x: (C, T), ndarray
         x = librosa.resample(x, orig_sr=self.sampling_rate_source, target_sr=self.sampling_rate_target, res_type="scipy", axis=1)
-        x = torch.from_numpy(x.T).to(self.device) # (B=C, T)
+        x = torch.from_numpy(x).to(self.device) # (B=C, T)
         
         # padding
         orig_length = x.size(-1)
@@ -67,7 +67,7 @@ class NeuralFBandExt(object):
         
         # inference
         y = self.model.infer(x.unsqueeze(1)).squeeze(1).cpu().numpy()
-                
+        
         # cut off
         if pad_length > 0:
             y = y[..., :orig_length]
@@ -162,25 +162,26 @@ def main():
             
             # load wav
             x, sr = sf.read(wavfn, dtype=np.float32) # x: (T, C) or (T,)
+            x = x.T if x.ndim > 1 else np.expand_dims(x, axis=0) # (C, T)
             
             # inference
             if model.sampling_rate_source < args.sampling_rate <= model.sampling_rate_target:
                 if sr != model.sampling_rate_source:
-                    x = librosa.resample(x, orig_sr=sr, target_sr=model.sampling_rate_source, res_type="scipy", axis=0)
+                    x = librosa.resample(x, orig_sr=sr, target_sr=model.sampling_rate_source, res_type="scipy", axis=1)
                     sr = model.sampling_rate_source
                 x /= abs(x).max()
-                x = x.T if x.ndim > 1 else np.expand_dims(x, axis=1) # (C, T)
-                x = model.infer(x) # (B=C, T)
-                x = x.T if x.shape[0] > 1 else x.flatten() # (T, C) or (T,)
+                x = model.infer(x) # (C, T)
                 sr = model.sampling_rate_target
             
             if args.sampling_rate != sr:
-                x = librosa.resample(x, orig_sr=sr, target_sr=args.sampling_rate, res_type="scipy", axis=0)
+                x = librosa.resample(x, orig_sr=sr, target_sr=args.sampling_rate, res_type="scipy", axis=1)
             
             if args.highpass is not None:
-                x = butter_highpass_filter(x, args.sampling_rate, cuttoff=args.highpass)
+                for i in range(x.shape[0]):
+                    x[i] = butter_highpass_filter(x[i], args.sampling_rate, cuttoff=args.highpass)
             
             # save wav
+            x = x.flatten() if x.shape[0] == 1 else x.T # (T, C) or (T,)
             sf.write(os.path.join(args.outdir, f"{utt_id}.wav"), x, args.sampling_rate, "PCM_16")
             
             rtf = (time.time() - start) / (len(x) / args.sampling_rate)
