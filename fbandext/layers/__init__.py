@@ -1,5 +1,6 @@
 
-from .utils import  *  # NOQA
-from .pqmf import *  # NOQA
-from .vq import  *  # NOQA
-from .stft_loss import  *  # NOQA
+from .utils import *
+from .pqmf import *
+from .vq import *
+from .stft_loss import *
+from .snake import *

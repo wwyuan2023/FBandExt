@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 
 # Copyright 2020 Tomoki Hayashi
-#  MIT License (https://opensource.org/licenses/MIT)
+# MIT License (https://opensource.org/licenses/MIT)
 
 """Pseudo QMF modules."""
 

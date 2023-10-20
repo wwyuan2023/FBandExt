@@ -55,7 +55,7 @@ class NeuralFBandExt(object):
     def infer(self, x):
         # x: (C, T), ndarray
         x = librosa.resample(x, orig_sr=self.sampling_rate_source, target_sr=self.sampling_rate_target, res_type="scipy", axis=1)
-        x = torch.from_numpy(x.T) # (B=C, T)
+        x = torch.from_numpy(x.T).to(self.device) # (B=C, T)
         
         # padding
         orig_length = x.size(-1)

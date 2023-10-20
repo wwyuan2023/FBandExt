@@ -572,9 +572,9 @@ def main():
         "sampling_rate_source": config["sampling_rate_source"],
         "sampling_rate_target": config["sampling_rate_target"],
     }
-    train_dataset = AudioSCPDataset(args.train_scp, **dataset_params)
+    train_dataset = AudioSCPDataset(args.train_scp, **dataset_params, num_repeat=config["num_repeat"])
     logging.info(f"The number of training files = {len(train_dataset)}.")
-    dev_dataset = AudioSCPDataset(args.dev_scp, **dataset_params)
+    dev_dataset = AudioSCPDataset(args.dev_scp, **dataset_params, num_repeat=1)
     logging.info(f"The number of development files = {len(dev_dataset)}.")
     dataset = {
         "train": train_dataset,

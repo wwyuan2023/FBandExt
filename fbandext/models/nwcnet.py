@@ -5,8 +5,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from fbandext.layers import PQMF
-from fbandext.layers import Transpose, ChannelNorm
+from fbandext.layers import Transpose
 
 
 class _LightConv1d(nn.Module):
@@ -89,12 +88,11 @@ class _Upsample(nn.Module):
         x = self.conv(x) # (B, T*factor, C)
         return x
 
-class Encoder(nn.Module):
+class NWCNetEncoder(nn.Module):
     def __init__(
         self,
-        downsample_factors,
         code_size,
-        code_bits,
+        downsample_factors,
         in_channels,
         conv_channels:list,
         conv_kernel_size:list,
@@ -109,12 +107,11 @@ class Encoder(nn.Module):
         assert in_channels % 2 == 0
         assert len(downsample_factors) == len(conv_channels) \
             == len(conv_kernel_size) == len(conv_dilation) == len(conv_groups)
-        self.frame_size = np.prod(downsample_factors)
-        self.downsample_factors = downsample_factors
-        self.code_size = code_size
-        self.code_bits = code_bits
         
-        self.scale_in = nn.Linear(1, in_channels)
+        self.scale_in = nn.Sequential(
+            Transpose(),
+            nn.Linear(1, in_channels),
+        )
         
         convnet = []
         conv_class = globals()[conv_class_name]
@@ -139,9 +136,10 @@ class Encoder(nn.Module):
         
         self.scale_out = nn.Sequential(
             nn.Tanh(),
-            nn.Linear(in_channels, code_size, 1),
-            nn.LayerNorm(code_size) if code_size > 1 else nn.Identity(),
+            nn.Linear(in_channels, code_size),
+            nn.LayerNorm(code_size),
             nn.Tanh(),
+            Transpose(),
         )
         
         # reset parameters
@@ -154,32 +152,20 @@ class Encoder(nn.Module):
                 if m.bias is not None: m.bias.data.fill_(0.0)
 
         self.apply(_reset_parameters)
-    
-    def quantize(self, x, bits=7):
-        Q = 2.0 ** bits
-        q = (torch.clamp(x, min=-1, max=0.999) * Q).int()
-        f = q.detach().float() / Q
-        x = x + (f - x).detach()
-        q = (q + Q).long() # [0, 2**(b+1)-1), eg [0, 255) if code_bits==8
-        return x, q
-    
+        
     def forward(self, x):
         # x: (B, 1, t), audio waveform, float32, range to [-1, 1]
-        x = self.scale_in(x.transpose(1,-1))
+        x = self.scale_in(x)
         x = self.convnet(x)
-        x = self.scale_out(x).transpose(1,-1)
-        
-        e, q = self.quantize(x, self.code_bits - 1) # (B, code_size, t)
-        return e, q
+        x = self.scale_out(x)
+        return x # (B, C, T), T=t//r
 
-class Decoder(nn.Module):
+class NWCNetDecoder(nn.Module):
     def __init__(
         self,
-        upsample_factors,
         code_size,
-        code_bits,
+        upsample_factors,
         context_window:list,
-        embed_size, 
         in_channels,
         conv_channels:list,
         conv_kernel_size:list,
@@ -193,26 +179,12 @@ class Decoder(nn.Module):
         super().__init__()
         assert len(upsample_factors) == len(conv_channels) \
             == len(conv_kernel_size) == len(conv_dilation) == len(conv_groups)
-        self.frame_size = np.prod(upsample_factors)
-        self.upsample_factors = upsample_factors
-        self.code_size = code_size
-        self.code_bits = code_bits
-        self.Q = int(2**(code_bits-1))
         self.context_window = context_window
-        self.kernel_size = sum(context_window) + 1
-        self.embed_size = embed_size
-        self.in_channels = in_channels
         
-        self.embedding = nn.Embedding(int(2**code_bits), embed_size//code_size)
-        self.conv = nn.Sequential(
-            nn.Conv1d(code_size, embed_size, self.kernel_size, bias=False),
-            Transpose(),
-            nn.LayerNorm(embed_size),
-            nn.ReLU(),
-        )
-        
+        kernel_size = sum(context_window) + 1
         self.scale_in = nn.Sequential(
-            nn.Linear(embed_size, in_channels),
+            nn.Conv1d(code_size, in_channels, kernel_size),
+            Transpose(),
             nn.LayerNorm(in_channels),
         )
         
@@ -258,33 +230,20 @@ class Decoder(nn.Module):
         self.apply(_reset_parameters)
     
     def forward(self, x):
-        # x: (B, C, T)
-        B, _, T = x.size()
-        
-        # embedding       
-        q = torch.clamp(x.transpose(1,-1), min=-1, max=0.999) * self.Q # (B, T, C)
-        q = q.long() + self.Q # [-Q, Q) -> [0, 2*Q)
-        qe = self.embedding(q).reshape(B, T, self.embed_size) # (B, T, E)
-        
-        xe = self.conv(F.pad(x, self.context_window)) # (B, T, E)
-        x = xe + qe
-        
-        # convs
+        # x: (B, C, T=frame)
+        x = F.pad(x, self.context_window)
         x = self.scale_in(x)
         x = self.convnet(x)
-        x = self.scale_out(x) # (B, 1, T*self.frame_size)
-        
-        return x
+        x = self.scale_out(x)
+        return x # (B, 1, t=audio length)
+
 
 class NWCNet(nn.Module):
     def __init__(
         self,
-        downsample_factors=(4, 4, 4, 8),
-        upsample_factors=(8, 4, 4, 4),
-        code_size=16,
-        code_bits=8,
-        context_window=(2,2),
         encoder_params={
+            "code_size": 32,
+            "downsample_factors": [4, 4, 4, 4],
             "in_channels": 64,
             "conv_channels": [32, 64, 128, 256],
             "conv_kernel_size": [9, 7, 5, 3],
@@ -298,7 +257,9 @@ class NWCNet(nn.Module):
             "conv_class_name": "_LightConv1d",
         },
         decoder_params={
-            "embed_size": 1024,
+            "code_size": 32,
+            "upsample_factors": [4, 4, 4, 4],
+            "context_window": [3, 3],
             "in_channels": 64,
             "conv_channels": [256, 128, 64, 32],
             "conv_kernel_size": [5, 7, 11, 17],
@@ -314,16 +275,12 @@ class NWCNet(nn.Module):
         use_weight_norm=False,
     ):
         super().__init__()
-        assert all([ x>=0 for x in context_window])
-        self.code_size = code_size
-        self.code_bits = code_bits
-        self.context_window = context_window
                 
         # encoder network
-        self.encoder = Encoder(downsample_factors, code_size, code_bits, **encoder_params)
+        self.encoder = NWCNetEncoder(**encoder_params)
         
         # decoder network
-        self.decoder = Decoder(upsample_factors, code_size, code_bits, context_window, **decoder_params)
+        self.decoder = NWCNetDecoder(**decoder_params)
                 
         # apply weight norm
         if use_weight_norm:
@@ -351,10 +308,10 @@ class NWCNet(nn.Module):
         # x: (B, c=1, t), c=audio channel, t=audio length
         
         # encoder
-        e, _ = self.encoder(x) # e: (B, E, T), T=frame
+        e = self.encoder(x) # e: (B, E, T), T=frame
         
         # decoder
-        x_hat = self.decoder(e) # (B, 1, t)
+        x_hat = self.decoder(e) # (B, 1, t), t=audio length
         y_hat = x_hat + x
         
         # statistic 
@@ -367,10 +324,10 @@ class NWCNet(nn.Module):
         # x: (B, c=1, t), c=audio channel, t=audio length
         
         # encoder
-        e, _ = self.encoder(x) # e: (B, E, T), T=frame
+        e = self.encoder(x) # e: (B, E, T), T=frame
         
         # decoder
-        x_hat = self.decoder(e) # (B, 1, t)
+        x_hat = self.decoder(e) # (B, 1, t), t=audio length
         y_hat = x_hat + x
                 
         return y_hat
