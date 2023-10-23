@@ -52,9 +52,14 @@ class NeuralFBandExt(object):
         self.inference = self.infer
     
     @torch.no_grad()
-    def infer(self, x):
+    def infer(self, x, sr=16000):
         # x: (C, T), ndarray
+        if sr != self.sampling_rate_source:
+            x = librosa.resample(x, orig_sr=sr, target_sr=self.sampling_rate_source, res_type="scipy", axis=1)
+            sr = self.sampling_rate_source
+        
         x = librosa.resample(x, orig_sr=self.sampling_rate_source, target_sr=self.sampling_rate_target, res_type="scipy", axis=1)
+        sr = self.sampling_rate_target
         x = torch.from_numpy(x).to(self.device) # (B=C, T)
         
         # padding
@@ -72,7 +77,7 @@ class NeuralFBandExt(object):
         if pad_length > 0:
             y = y[..., :orig_length]
         
-        return y # (C, T)
+        return y, sr # (C, T)
 
 
 def main():
@@ -165,13 +170,9 @@ def main():
             x = x.T if x.ndim > 1 else np.expand_dims(x, axis=0) # (C, T)
             
             # inference
-            if model.sampling_rate_source < args.sampling_rate <= model.sampling_rate_target:
-                if sr != model.sampling_rate_source:
-                    x = librosa.resample(x, orig_sr=sr, target_sr=model.sampling_rate_source, res_type="scipy", axis=1)
-                    sr = model.sampling_rate_source
+            if model.sampling_rate_source < args.sampling_rate:
                 x /= abs(x).max()
-                x = model.infer(x) # (C, T)
-                sr = model.sampling_rate_target
+                x, sr = model.infer(x, sr) # (C, T)
             
             if args.sampling_rate != sr:
                 x = librosa.resample(x, orig_sr=sr, target_sr=args.sampling_rate, res_type="scipy", axis=1)
