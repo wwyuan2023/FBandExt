@@ -1,0 +1,170 @@
+batch_max_steps: 65536
+batch_size: 10
+code_size: 64
+config: conf/bigvgan.yaml
+context_window: &id001
+- 3
+- 3
+dev_scp: data/valid.scp
+discriminator_grad_norm: 1
+discriminator_optimizer_params:
+  eps: 1.0e-06
+  lr: 0.0001
+  weight_decay: 0.0
+discriminator_optimizer_type: RAdam
+discriminator_params:
+  multi_stft_discriminator_params:
+    conv_channels:
+    - 64
+    - 64
+    - 64
+    - 64
+    - 64
+    fft_sizes: &id003
+    - 128
+    - 256
+    - 512
+    - 1024
+    - 2048
+    hop_sizes: &id004
+    - 32
+    - 64
+    - 128
+    - 256
+    - 512
+    kernel_sizes:
+    - 5
+    - 5
+    - 5
+    - 5
+    - 5
+    num_layers:
+    - 4
+    - 5
+    - 6
+    - 7
+    - 8
+    use_weight_norm: false
+    win_sizes: &id005
+    - 128
+    - 256
+    - 512
+    - 1024
+    - 2048
+    window: hann_window
+  multi_wave_discriminator_params:
+    conv_channels: 64
+    kernel_size: 5
+    layers: 8
+    num_dwt: 5
+    use_weight_norm: true
+discriminator_scheduler_params:
+  gamma: 0.5
+  step_size: 500000
+discriminator_scheduler_type: StepLR
+discriminator_train_start_steps: 0
+discriminator_type: MultiWaveSTFTDiscriminator
+distributed: true
+downsample_factors: &id002
+- 4
+- 4
+- 4
+- 4
+eval_interval_steps: 10000
+generator_grad_norm: 10
+generator_optimizer_params:
+  lr: 0.0002
+  weight_decay: 0.0
+generator_optimizer_type: AdamW
+generator_params:
+  decoder_params:
+    context_window: *id001
+    in_channels: 64
+    resblock_dilation_sizes:
+    - - 1
+      - 3
+      - 5
+    - - 1
+      - 3
+      - 5
+    - - 1
+      - 3
+      - 5
+    resblock_kernel_sizes:
+    - 3
+    - 7
+    - 11
+    upsample_initial_channel: 256
+    upsample_rates: &id006
+    - 4
+    - 4
+    - 4
+    - 4
+  encoder_params:
+    act_func: ReLU
+    act_func_transition: Tanh
+    act_params:
+      inplace: false
+    act_params_transition: {}
+    code_size: 64
+    conv_channels:
+    - 64
+    - 128
+    - 256
+    - 512
+    conv_class_name: _LightConv1d
+    conv_dilation:
+    - - 1
+    - - 1
+    - - 1
+    - - 1
+    conv_groups:
+    - 1
+    - 2
+    - 4
+    - 8
+    conv_kernel_size:
+    - 9
+    - 7
+    - 5
+    - 3
+    downsample_factors: *id002
+    in_channels: 64
+    padding_mode: same
+generator_scheduler_params:
+  gamma: 0.5
+  step_size: 500000
+generator_scheduler_type: StepLR
+generator_type: BigVGAN
+lambda_adv: 1.0
+lambda_mse: 500.0
+lambda_punish: 0.0001
+lambda_stft: 2.0
+log_interval_steps: 1000
+num_repeat: 10
+num_save_intermediate_results: 8
+num_workers: 8
+outdir: exp/bigvgan
+pin_memory: true
+pretrain: ''
+rank: 0
+resume: exp/bigvgan/checkpoint-17000steps.pkl
+sampling_rate_source: 16000
+sampling_rate_target: 32000
+save_interval_steps: 1000
+stft_loss_params:
+  fft_sizes: *id003
+  hop_sizes: *id004
+  win_sizes: *id005
+  window: hann_window
+stft_params:
+  fft_sizes: *id003
+  hop_sizes: *id004
+  win_sizes: *id005
+  window: hann_window
+train_max_steps: 1000000
+train_scp: data/train.scp
+upsample_factors: *id006
+verbose: 1
+version: 0.1.0
+world_size: 3
