@@ -41,7 +41,15 @@ class NeuralFBandExt(object):
         self.sampling_rate_target = self.config["sampling_rate_target"]
         
         # setup device
-        self.device = torch.device(device)
+        if device is not None:
+            if isinstance(device, torch.device):
+                self.device = device
+            elif isinstance(device, str):
+                self.device = torch.device(device)
+        elif torch.cuda.is_available():
+            self.device = torch.device('cuda')
+        else:
+            self.device = torch.device('cpu')
         
         # setup model
         model = load_model(checkpoint_path, self.config)
